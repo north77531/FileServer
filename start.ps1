@@ -1,38 +1,34 @@
-# 啟動 FileServer + Cloudflare Tunnel
-# 如需修改共享資料夾，請編輯 appsettings.json 中的 SharedFolder
-
-$dotnet      = "C:\Program Files\dotnet\dotnet.exe"
+$exe         = "$PSScriptRoot\publish\FileServer.exe"
 $cloudflared = "C:\Program Files (x86)\cloudflared\cloudflared.exe"
-$project     = "$PSScriptRoot\FileServer.csproj"
 $port        = 5000
 
-Write-Host "=============================" -ForegroundColor Cyan
-Write-Host " FileServer 啟動中..." -ForegroundColor Cyan
-Write-Host "=============================" -ForegroundColor Cyan
-Write-Host ""
+Write-Host "Starting FileServer..." -ForegroundColor Cyan
 
-# 背景啟動 ASP.NET Core
-$serverJob = Start-Job -ScriptBlock {
-    param($dotnet, $project, $port)
-    & $dotnet run --project $project --urls "http://0.0.0.0:$port"
-} -ArgumentList $dotnet, $project, $port
+Start-Process -FilePath $exe -ArgumentList "--urls", "http://0.0.0.0:$port" -WorkingDirectory "$PSScriptRoot\publish"
 
-Write-Host "等待伺服器啟動..." -ForegroundColor Yellow
-Start-Sleep -Seconds 4
-
-# 啟動 Cloudflare Quick Tunnel（會顯示公開網址）
-Write-Host ""
-Write-Host "Cloudflare Tunnel 啟動中，請稍候..." -ForegroundColor Yellow
-Write-Host "公開網址會顯示在下方（格式：https://xxxx.trycloudflare.com）" -ForegroundColor Green
-Write-Host "按 Ctrl+C 可停止所有服務" -ForegroundColor Gray
-Write-Host ""
-
-try {
-    & $cloudflared tunnel --url "http://localhost:$port"
-} finally {
-    Write-Host ""
-    Write-Host "正在停止伺服器..." -ForegroundColor Yellow
-    Stop-Job $serverJob -ErrorAction SilentlyContinue
-    Remove-Job $serverJob -ErrorAction SilentlyContinue
-    Write-Host "已停止。" -ForegroundColor Gray
+# Wait until server actually responds (up to 30 seconds)
+Write-Host "Waiting for server to respond..." -ForegroundColor Yellow
+$ready = $false
+for ($i = 0; $i -lt 30; $i++) {
+    Start-Sleep -Seconds 1
+    try {
+        $r = Invoke-WebRequest -Uri "http://localhost:$port" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+        $ready = $true
+        break
+    } catch {}
 }
+
+if (-not $ready) {
+    Write-Host "Server did not start. Please check if FileServer.exe is working." -ForegroundColor Red
+    pause
+    exit 1
+}
+
+Write-Host "Server is up!" -ForegroundColor Green
+Write-Host ""
+Write-Host "Starting Cloudflare Tunnel..." -ForegroundColor Yellow
+Write-Host "Public URL will appear below (https://xxxx.trycloudflare.com)" -ForegroundColor Green
+Write-Host "Press Ctrl+C to stop" -ForegroundColor Gray
+Write-Host ""
+
+& $cloudflared tunnel --url "http://localhost:$port"
