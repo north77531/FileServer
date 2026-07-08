@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 
 public static class HouseModule
 {
-    static readonly string DataDir = Path.Combine(AppContext.BaseDirectory, "data");
+    static readonly string DataDir = Environment.GetEnvironmentVariable("DATA_DIR") ?? Path.Combine(AppContext.BaseDirectory, "data");
     static readonly string PropertiesFile = Path.Combine(DataDir, "properties.json");
     static readonly string PropertyExpensesFile = Path.Combine(DataDir, "property_expenses.json");
     static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };
@@ -13,25 +13,65 @@ public static class HouseModule
         app.MapGet("/house", ctx => { ctx.Response.Redirect("/house/properties"); return Task.CompletedTask; });
         app.MapGet("/house/properties", PropertiesPage);
         app.MapGet("/house/properties/add", AddPropertyPage);
+        app.MapGet("/house/properties/{id}/edit", EditPropertyPage);
         app.MapGet("/house/properties/{id}/expenses", PropertyExpensesPage);
         app.MapGet("/house/properties/{id}/expenses/add", AddPropertyExpensePage);
         app.MapGet("/house/properties/{id}/sell", SellPropertyPage);
         app.MapGet("/house/realestate", RealEstatePage);
 
         app.MapPost("/api/house/properties", AddProperty);
+        app.MapPut("/api/house/properties/{id}", UpdateProperty);
         app.MapDelete("/api/house/properties/{id}", DeleteProperty);
         app.MapPost("/api/house/properties/{id}/expenses", AddPropertyExpense);
         app.MapDelete("/api/house/expenses/{id}", DeletePropertyExpense);
         app.MapPost("/api/house/properties/{id}/sell", RecordSale);
         app.MapDelete("/api/house/properties/{id}/sell", ClearSale);
-        app.MapGet("/api/house/realestate/search", SearchRealEstate);
+    }
+
+    static readonly Dictionary<string, string> CountyCodes = new()
+    {
+        ["臺北市"] = "A", ["台北市"] = "A",
+        ["新北市"] = "F",
+        ["桃園市"] = "H",
+        ["臺中市"] = "B", ["台中市"] = "B",
+        ["臺南市"] = "D", ["台南市"] = "D",
+        ["高雄市"] = "E",
+        ["基隆市"] = "C",
+        ["新竹市"] = "O",
+        ["新竹縣"] = "J",
+        ["苗栗縣"] = "K",
+        ["南投縣"] = "M",
+        ["彰化縣"] = "N",
+        ["雲林縣"] = "P",
+        ["嘉義市"] = "I",
+        ["嘉義縣"] = "Q",
+        ["屏東縣"] = "T",
+        ["宜蘭縣"] = "G",
+        ["臺東縣"] = "V", ["台東縣"] = "V",
+        ["花蓮縣"] = "U",
+    };
+
+    static (string? County, string Keyword) ParseAddress(string address)
+    {
+        address = address.Trim();
+        if (address.Length < 3) return (null, "");
+        var cityName = address[..3];
+        if (!CountyCodes.TryGetValue(cityName, out var county)) return (null, "");
+
+        var remainder = address[3..];
+        var m = System.Text.RegularExpressions.Regex.Match(remainder, "^.{0,6}?(區|鎮|鄉)");
+        var keyword = m.Success ? m.Value : "";
+        return (county, keyword);
     }
 
     // ── Pages ─────────────────────────────────────────────────────────────
 
     static async Task PropertiesPage(HttpContext ctx)
     {
-        var props = LoadProperties();
+        var props = LoadProperties()
+            .OrderBy(p => p.SalePrice.HasValue && p.SalePrice > 0 ? 1 : 0)
+            .ThenByDescending(p => p.PurchaseDate)
+            .ToList();
         var expenses = LoadExpenses();
 
         var cards = props.Count == 0
@@ -72,6 +112,7 @@ public static class HouseModule
     </div>
     <a href='/house/properties/{p.Id}/expenses' class='btn btn-sm btn-outline'>花費紀錄</a>
     <a href='/house/properties/{p.Id}/expenses/add' class='btn btn-sm'>新增花費</a>
+    <a href='/house/properties/{p.Id}/edit' class='btn btn-sm btn-outline'>編輯</a>
     {sellBtn}
     <button class='btn btn-sm btn-danger' onclick='delProp(""{p.Id}"")'>刪除</button>
   </div>
@@ -91,12 +132,38 @@ public static class HouseModule
 </div>";
             }));
 
+        var exportRows = string.Join("", props.Select(p =>
+        {
+            var propExp = expenses.Where(e => e.PropertyId == p.Id).Sum(e => e.Amount);
+            var isSold = p.SalePrice.HasValue && p.SalePrice > 0;
+            return $@"<tr>
+  <td>{System.Net.WebUtility.HtmlEncode(p.Name)}</td>
+  <td>{System.Net.WebUtility.HtmlEncode(p.PropertyType)}</td>
+  <td>{System.Net.WebUtility.HtmlEncode(p.Address)}</td>
+  <td>{p.AreaPing}</td>
+  <td>{p.LandPing}</td>
+  <td>{p.BuildYear}</td>
+  <td>{p.TotalFloors}</td>
+  <td>{p.PurchasePrice}</td>
+  <td>{p.PurchaseDate}</td>
+  <td>{propExp}</td>
+  <td>{(isSold ? p.SalePrice!.Value.ToString() : "")}</td>
+  <td>{(isSold ? p.SaleDate : "")}</td>
+  <td>{System.Net.WebUtility.HtmlEncode(p.Notes)}</td>
+</tr>";
+        }));
+
         var body = $@"
 <div class='actions' style='margin-bottom:16px'>
   <h1 style='margin:0;flex:1'>🏡 目前房產</h1>
+  <button class='btn btn-sm btn-outline' onclick=""exportTableToExcel('prop-export-table','目前房產',{{btn:this}})"">⬇ 下載Excel</button>
   <a href='/house/properties/add' class='btn'>＋ 新增房產</a>
 </div>
 {cards}
+<table id='prop-export-table' style='display:none'>
+<thead><tr><th>房產名稱</th><th>類型</th><th>地址</th><th>建坪</th><th>地坪</th><th>建築年份</th><th>樓層數</th><th>購入價格</th><th>購入日期</th><th>累計花費</th><th>賣出價格</th><th>賣出日期</th><th>備註</th></tr></thead>
+<tbody>{exportRows}</tbody>
+</table>
 <div id='msg'></div>
 <script>
 async function delProp(id) {{
@@ -209,6 +276,110 @@ function showMsg(m,t){document.getElementById('msg').innerHTML=`<div class='aler
         await ctx.Response.WriteAsync(SharedLayout.Page("新增房產", "house", "properties", body));
     }
 
+    static async Task EditPropertyPage(string id, HttpContext ctx)
+    {
+        var props = LoadProperties();
+        var prop = props.FirstOrDefault(p => p.Id == id);
+        if (prop == null) { ctx.Response.StatusCode = 404; await ctx.Response.WriteAsync("房產不存在"); return; }
+
+        var types = new[] { "公寓", "大樓", "透天", "套房", "別墅", "其他" };
+        var typeOptions = string.Join("", types.Select(t =>
+            $"<option{(t == prop.PropertyType ? " selected" : "")}>{t}</option>"));
+
+        var body = $@"
+<h1>🏡 編輯房產</h1>
+<div class='form-card'>
+<div id='msg'></div>
+<div class='row2'>
+  <div class='field'>
+    <label>房產名稱</label>
+    <input id='name' value='{System.Net.WebUtility.HtmlEncode(prop.Name)}'>
+  </div>
+  <div class='field'>
+    <label>類型</label>
+    <select id='propertyType'>{typeOptions}</select>
+  </div>
+</div>
+<div class='field'>
+  <label>地址</label>
+  <input id='address' value='{System.Net.WebUtility.HtmlEncode(prop.Address)}'>
+</div>
+<div class='row3'>
+  <div class='field'>
+    <label>建坪（坪）</label>
+    <input type='number' id='areaPing' step='0.01' value='{prop.AreaPing}'>
+  </div>
+  <div class='field'>
+    <label>地坪（坪）</label>
+    <input type='number' id='landPing' step='0.01' value='{prop.LandPing}'>
+  </div>
+  <div class='field'>
+    <label>建築年份（西元）</label>
+    <input type='number' id='buildYear' value='{prop.BuildYear}' min='1900' max='2100' oninput='updateAge()'>
+  </div>
+  <div class='field'>
+    <label>樓層數</label>
+    <input type='number' id='totalFloors' value='{prop.TotalFloors}' min='1'>
+  </div>
+</div>
+<div id='ageHint' style='display:none;margin:-8px 0 12px;color:#888;font-size:.88rem'></div>
+<div class='row2'>
+  <div class='field'>
+    <label>購入價格（元）</label>
+    <input type='number' id='purchasePrice' value='{prop.PurchasePrice}'>
+  </div>
+  <div class='field'>
+    <label>購入日期</label>
+    <input type='date' id='purchaseDate' value='{prop.PurchaseDate}'>
+  </div>
+</div>
+<div class='field'>
+  <label>備註</label>
+  <textarea id='notes' rows='2'>{System.Net.WebUtility.HtmlEncode(prop.Notes)}</textarea>
+</div>
+<div class='actions'>
+  <button class='btn' onclick='submit()'>儲存變更</button>
+  <a href='/house/properties' class='btn btn-outline'>取消</a>
+</div>
+</div>
+<script>
+function updateAge() {{
+  const y = parseInt(document.getElementById('buildYear').value);
+  const hint = document.getElementById('ageHint');
+  if (y > 1900 && y <= new Date().getFullYear()) {{
+    const age = new Date().getFullYear() - y;
+    hint.textContent = `屋齡約 ${{age}} 年`;
+    hint.style.display = '';
+  }} else {{
+    hint.style.display = 'none';
+  }}
+}}
+updateAge();
+async function submit() {{
+  const req = {{
+    name: document.getElementById('name').value.trim(),
+    propertyType: document.getElementById('propertyType').value,
+    address: document.getElementById('address').value.trim(),
+    areaPing: parseFloat(document.getElementById('areaPing').value) || 0,
+    landPing: parseFloat(document.getElementById('landPing').value) || 0,
+    buildYear: parseInt(document.getElementById('buildYear').value) || 0,
+    totalFloors: parseInt(document.getElementById('totalFloors').value) || 0,
+    purchasePrice: parseFloat(document.getElementById('purchasePrice').value) || 0,
+    purchaseDate: document.getElementById('purchaseDate').value,
+    notes: document.getElementById('notes').value.trim()
+  }};
+  if (!req.name || !req.address) {{ showMsg('請填寫房產名稱與地址', 'err'); return; }}
+  const r = await fetch('/api/house/properties/{id}', {{method:'PUT', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify(req)}});
+  if (r.ok) {{ showMsg('✓ 已儲存！', 'ok'); setTimeout(() => location.href='/house/properties', 1200); }}
+  else {{ const t = await r.text(); showMsg(t || '儲存失敗', 'err'); }}
+}}
+function showMsg(m,t){{document.getElementById('msg').innerHTML=`<div class='alert ${{t}}'>${{m}}</div>`;}}
+</script>";
+
+        ctx.Response.ContentType = "text/html; charset=utf-8";
+        await ctx.Response.WriteAsync(SharedLayout.Page("編輯房產", "house", "properties", body));
+    }
+
     static async Task SellPropertyPage(string id, HttpContext ctx)
     {
         var props = LoadProperties();
@@ -315,11 +486,13 @@ function showMsg(m,t){{document.getElementById('msg').innerHTML=`<div class='ale
             .Select(g => $"<div class='card'><div class='lbl'>{g.Key}</div><div class='val' style='font-size:1rem'>{g.Sum(x => x.Amount):N0} 元</div></div>");
 
         var rows = expenses.Count == 0
-            ? "<tr><td colspan='6' style='text-align:center;padding:30px;color:#999'>尚無花費紀錄</td></tr>"
+            ? "<tr><td colspan='8' style='text-align:center;padding:30px;color:#999'>尚無花費紀錄</td></tr>"
             : string.Join("", expenses.Select(e => $@"
 <tr>
   <td>{e.Date}</td>
   <td><span class='tag'>{System.Net.WebUtility.HtmlEncode(e.Category)}</span></td>
+  <td>{System.Net.WebUtility.HtmlEncode(e.ItemName)}</td>
+  <td>{System.Net.WebUtility.HtmlEncode(e.Brand)}</td>
   <td style='text-align:right;color:#c00'>{e.Amount:N0}</td>
   <td>{System.Net.WebUtility.HtmlEncode(e.Vendor)}</td>
   <td>{System.Net.WebUtility.HtmlEncode(e.Notes)}</td>
@@ -332,6 +505,7 @@ function showMsg(m,t){{document.getElementById('msg').innerHTML=`<div class='ale
     <a href='/house/properties' style='color:#888;font-size:.88rem;text-decoration:none'>← 返回房產列表</a>
     <h1 style='margin:4px 0 0'>{System.Net.WebUtility.HtmlEncode(prop.Name)} — 花費紀錄</h1>
   </div>
+  <button class='btn btn-sm btn-outline' onclick=""exportTableToExcel('house-exp-table','{System.Net.WebUtility.HtmlEncode(prop.Name)}花費紀錄',{{skipCols:[7],btn:this}})"">⬇ 下載Excel</button>
   <a href='/house/properties/{id}/expenses/add' class='btn'>＋ 新增花費</a>
 </div>
 <div class='cards'>
@@ -340,9 +514,14 @@ function showMsg(m,t){{document.getElementById('msg').innerHTML=`<div class='ale
   {string.Join("", categories)}
 </div>
 <div class='table-wrap'>
-<table>
-<thead><tr><th>日期</th><th>類別</th><th style='text-align:right'>金額</th><th>店家／廠商</th><th>備註</th><th></th></tr></thead>
+<table id='house-exp-table'>
+<thead><tr><th>日期</th><th>類別</th><th>品項</th><th>品牌</th><th style='text-align:right'>金額</th><th>店家／廠商</th><th>備註</th><th></th></tr></thead>
 <tbody>{rows}</tbody>
+<tfoot><tr>
+  <td colspan='4'>篩選合計</td>
+  <td style='text-align:right;font-weight:600' id='hexp-tf-total'>{total:N0}</td>
+  <td colspan='3'></td>
+</tr></tfoot>
 </table>
 </div>
 <div id='msg' style='margin-top:12px'></div>
@@ -353,6 +532,11 @@ async function del(id) {{
   if (r.ok) location.reload();
   else document.getElementById('msg').innerHTML = '<div class=""alert err"">刪除失敗</div>';
 }}
+initTable('house-exp-table', {{
+  cols: 8,
+  noFilter: [4, 7],
+  sumCols: [{{col: 4, id: 'hexp-tf-total'}}]
+}});
 </script>";
 
         ctx.Response.ContentType = "text/html; charset=utf-8";
@@ -384,6 +568,16 @@ async function del(id) {{
   <div class='field' id='subCategoryField' style='display:none'>
     <label>子分類</label>
     <select id='subCategory'></select>
+  </div>
+</div>
+<div class='row2'>
+  <div class='field'>
+    <label>品項</label>
+    <input id='itemName' placeholder='選填，如：變頻冷氣、馬桶'>
+  </div>
+  <div class='field'>
+    <label>品牌</label>
+    <input id='brand' placeholder='選填，如：大金、TOTO'>
   </div>
 </div>
 <div class='row2'>
@@ -436,7 +630,9 @@ async function submit() {{
     date: document.getElementById('date').value,
     amount: parseFloat(document.getElementById('amount').value) || 0,
     vendor: document.getElementById('vendor').value.trim(),
-    notes: document.getElementById('notes').value.trim()
+    notes: document.getElementById('notes').value.trim(),
+    itemName: document.getElementById('itemName').value.trim(),
+    brand: document.getElementById('brand').value.trim()
   }};
   if (req.amount <= 0) {{ showMsg('請輸入金額', 'err'); return; }}
   const r = await fetch('/api/house/properties/{id}/expenses', {{method:'POST', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify(req)}});
@@ -450,85 +646,172 @@ function showMsg(m,t){{document.getElementById('msg').innerHTML=`<div class='ale
         await ctx.Response.WriteAsync(SharedLayout.Page("新增房產花費", "house", "properties", body));
     }
 
-    static async Task RealEstatePage(HttpContext ctx)
+    static async Task RealEstatePage(HttpContext ctx, IHttpClientFactory httpFactory)
     {
-        var body = @"
-<h1>🔍 實價登入查詢</h1>
-<div class='form-card' style='max-width:700px'>
-  <p style='color:#666;font-size:.9rem;margin:0 0 16px'>查詢附近近2年不動產成交資料（資料來源：內政部不動產成交案件資訊）</p>
-  <div class='row2'>
-    <div class='field'>
-      <label>縣市</label>
-      <select id='county'>
-        <option value='A'>臺北市</option><option value='F'>新北市</option><option value='H'>桃園市</option>
-        <option value='B'>臺中市</option><option value='D'>臺南市</option><option value='E'>高雄市</option>
-        <option value='C'>基隆市</option><option value='O'>新竹市</option><option value='J'>新竹縣</option>
-        <option value='K'>苗栗縣</option><option value='M'>南投縣</option><option value='N'>彰化縣</option>
-        <option value='P'>雲林縣</option><option value='I'>嘉義市</option><option value='Q'>嘉義縣</option>
-        <option value='T'>屏東縣</option><option value='G'>宜蘭縣</option><option value='V'>臺東縣</option>
-        <option value='U'>花蓮縣</option>
-      </select>
-    </div>
-    <div class='field'>
-      <label>交易類型</label>
-      <select id='tradeType'>
-        <option value='buy'>買賣</option><option value='rent'>租賃</option><option value='presell'>預售屋</option>
-      </select>
-    </div>
-  </div>
-  <div class='field'>
-    <label>地址關鍵字（選填，如：行政區名稱、路名）</label>
-    <input id='keyword' placeholder='如：大安區、忠孝東路'>
-  </div>
-  <div class='actions'>
-    <button class='btn' onclick='search()' id='searchBtn'>🔍 查詢</button>
-  </div>
+        var disabledBody = "<h1>🔍 實價登入</h1><div class='empty-state'><div class='icon'>🚧</div><p>此功能目前已停用</p></div>";
+        ctx.Response.ContentType = "text/html; charset=utf-8";
+        await ctx.Response.WriteAsync(SharedLayout.Page("實價登入", "house", "realestate", disabledBody));
+        return;
+#pragma warning disable CS0162
+        var props = LoadProperties().Where(p => !(p.SalePrice.HasValue && p.SalePrice > 0)).ToList();
+
+        if (props.Count == 0)
+        {
+            var emptyBody = "<h1>🔍 實價登入</h1><div class='empty-state'><div class='icon'>🏡</div><p>目前沒有持有中（未賣出）的房產</p></div>";
+            ctx.Response.ContentType = "text/html; charset=utf-8";
+            await ctx.Response.WriteAsync(SharedLayout.Page("實價登入", "house", "realestate", emptyBody));
+            return;
+        }
+
+        var results = await Task.WhenAll(props.Select(async p =>
+        {
+            var (county, keyword) = ParseAddress(p.Address);
+            if (county == null) return (Prop: p, Records: (List<Dictionary<string, string?>>?)null, Note: (string?)null, Error: "無法從地址辨識縣市，請至官方網站查詢");
+            try
+            {
+                var (records, note) = await FetchRealEstateWithFallback(county, keyword, httpFactory);
+                return (Prop: p, Records: (List<Dictionary<string, string?>>?)records, Note: note, Error: (string?)null);
+            }
+            catch (Exception ex)
+            {
+                return (Prop: p, Records: (List<Dictionary<string, string?>>?)null, Note: (string?)null, Error: $"查詢失敗：{ex.Message}");
+            }
+        }));
+
+        var sections = string.Join("", results.Select(r =>
+        {
+            var p = r.Prop;
+            string content;
+            if (r.Error != null)
+            {
+                content = $"<div class='alert err'>{System.Net.WebUtility.HtmlEncode(r.Error)}<br><a href='https://lvr.land.moi.gov.tw/' target='_blank'>前往官方實價登錄查詢網站</a></div>";
+            }
+            else if (r.Records == null || r.Records.Count == 0)
+            {
+                content = "<div class='alert' style='background:#fff9e6;border:1px solid #e6d87a'>查無近2年附近成交資料。<a href='https://lvr.land.moi.gov.tw/' target='_blank'>可至官方網站查詢</a></div>";
+            }
+            else
+            {
+                var tid = "re-" + p.Id;
+                var rows = string.Join("", r.Records.Select(rec => $@"
+<tr>
+  <td>{rec.GetValueOrDefault("date")}</td>
+  <td>{rec.GetValueOrDefault("address")}</td>
+  <td>{rec.GetValueOrDefault("buildingType")}</td>
+  <td style='text-align:right'>{rec.GetValueOrDefault("area")}</td>
+  <td style='text-align:right;color:#c00;font-weight:600'>{rec.GetValueOrDefault("totalPrice")}</td>
+  <td style='text-align:right'>{rec.GetValueOrDefault("unitPrice")}</td>
+  <td>{rec.GetValueOrDefault("floor")}</td>
+</tr>"));
+                var noteHtml = string.IsNullOrEmpty(r.Note) ? "" : $"<p style='color:#c77700;font-size:.85rem;margin:0 0 10px'>⚠ {System.Net.WebUtility.HtmlEncode(r.Note)}</p>";
+                content = $@"
+{noteHtml}
+<div class='actions' style='margin-bottom:10px'>
+  <p style='color:#888;font-size:.85rem;margin:0;flex:1'>共 {r.Records.Count} 筆</p>
+  <button class='btn btn-sm btn-outline' onclick=""exportTableToExcel('{tid}','{System.Net.WebUtility.HtmlEncode(p.Name)}實價登入',{{btn:this}})"">⬇ 下載Excel</button>
 </div>
-<div id='result' style='margin-top:20px'></div>
-<script>
-async function search() {
-  const county = document.getElementById('county').value;
-  const tradeType = document.getElementById('tradeType').value;
-  const keyword = document.getElementById('keyword').value.trim();
-  const btn = document.getElementById('searchBtn');
-  btn.textContent = '查詢中…'; btn.disabled = true;
-  document.getElementById('result').innerHTML = '<p style=""color:#999"">資料載入中，請稍候…</p>';
-  try {
-    const url = '/api/house/realestate/search?county=' + county + '&tradeType=' + tradeType + '&keyword=' + encodeURIComponent(keyword);
-    const r = await fetch(url);
-    const data = await r.json();
-    if (data.error) {
-      document.getElementById('result').innerHTML = `<div class='alert err'>${data.error}<br><a href='https://lvr.land.moi.gov.tw/' target='_blank'>前往官方實價登錄查詢網站</a></div>`;
-    } else if (data.records && data.records.length > 0) {
-      renderTable(data.records);
-    } else {
-      document.getElementById('result').innerHTML = '<div class=""alert"" style=""background:#fff9e6;border:1px solid #e6d87a"">查無資料。<a href=""https://lvr.land.moi.gov.tw/"" target=""_blank"">可至官方網站查詢</a></div>';
-    }
-  } catch(e) {
-    document.getElementById('result').innerHTML = '<div class=\'alert err\'>查詢失敗，請<a href=\'https://lvr.land.moi.gov.tw/\' target=\'_blank\'>前往官方實價登錄查詢網站</a></div>';
-  } finally {
-    btn.textContent = '🔍 查詢'; btn.disabled = false;
-  }
-}
-function renderTable(records) {
-  const isBuy = records[0] && records[0].totalPrice !== undefined;
-  let html = '<h2>查詢結果（共 ' + records.length + ' 筆）</h2><div class=""table-wrap""><table>';
-  if (isBuy) {
-    html += '<thead><tr><th>交易日期</th><th>地址</th><th>建物型態</th><th>坪數</th><th style=""text-align:right"">總價(萬)</th><th style=""text-align:right"">單價(萬/坪)</th><th>樓層</th></tr></thead><tbody>';
-    for (const r of records)
-      html += `<tr><td>${r.date||''}</td><td>${r.address||''}</td><td>${r.buildingType||''}</td><td style=""text-align:right"">${r.area||''}</td><td style=""text-align:right;color:#c00;font-weight:600"">${r.totalPrice||''}</td><td style=""text-align:right"">${r.unitPrice||''}</td><td>${r.floor||''}</td></tr>`;
-  } else {
-    html += '<thead><tr><th>租賃日期</th><th>地址</th><th>建物型態</th><th>坪數</th><th style=""text-align:right"">月租金</th><th>樓層</th></tr></thead><tbody>';
-    for (const r of records)
-      html += `<tr><td>${r.date||''}</td><td>${r.address||''}</td><td>${r.buildingType||''}</td><td style=""text-align:right"">${r.area||''}</td><td style=""text-align:right;color:#c00;font-weight:600"">${r.totalPrice||''}</td><td>${r.floor||''}</td></tr>`;
-  }
-  html += '</tbody></table></div>';
-  document.getElementById('result').innerHTML = html;
-}
-</script>";
+<div class='table-wrap'>
+<table id='{tid}'>
+<thead><tr><th>交易日期</th><th>地址</th><th>建物型態</th><th style='text-align:right'>坪數</th><th style='text-align:right'>總價(萬)</th><th style='text-align:right'>單價(萬/坪)</th><th>樓層</th></tr></thead>
+<tbody>{rows}</tbody>
+</table>
+</div>
+<script>initTable('{tid}', {{ cols: 7 }});</script>";
+            }
+
+            return $@"
+<div class='section'>
+  <h2 style='margin-top:0'>{System.Net.WebUtility.HtmlEncode(p.Name)} — {System.Net.WebUtility.HtmlEncode(p.Address)}</h2>
+  {content}
+</div>";
+        }));
+
+        var body = $@"
+<h1>🔍 實價登入 — 持有房產附近成交資料</h1>
+<p style='color:#666;font-size:.9rem;margin:0 0 16px'>資料來源：內政部不動產成交案件資訊。僅顯示目前持有中（未賣出）的房產，預設查詢近2年鄰近區域，查無資料時自動擴大範圍或延長至近3年。</p>
+{sections}";
 
         ctx.Response.ContentType = "text/html; charset=utf-8";
-        await ctx.Response.WriteAsync(SharedLayout.Page("實價登入查詢", "house", "realestate", body));
+        await ctx.Response.WriteAsync(SharedLayout.Page("實價登入", "house", "realestate", body));
+#pragma warning restore CS0162
+    }
+
+    static async Task<(List<Dictionary<string, string?>> Records, string? Note)> FetchRealEstateWithFallback(
+        string county, string keyword, IHttpClientFactory httpFactory)
+    {
+        var attempts = new List<(string? Keyword, int Years, string? Note)>
+        {
+            (keyword, 2, null),
+        };
+        if (!string.IsNullOrEmpty(keyword))
+            attempts.Add((null, 2, "鄰近區域近2年查無資料，已擴大為全縣市範圍"));
+        attempts.Add((keyword, 3, string.IsNullOrEmpty(keyword) ? "全縣市範圍近2年查無資料，已延長為近3年" : "鄰近區域近2年查無資料，已延長為近3年"));
+        if (!string.IsNullOrEmpty(keyword))
+            attempts.Add((null, 3, "鄰近區域近3年仍查無資料，已擴大為全縣市範圍並延長為近3年"));
+
+        foreach (var (kw, years, note) in attempts)
+        {
+            var records = await FetchRealEstate(county, kw ?? "", years, httpFactory);
+            if (records.Count > 0) return (records, note);
+        }
+
+        return ([], null);
+    }
+
+    // The per-county CSV endpoint (type=a&county=X) was retired by the government site; it now serves a season-wide
+    // zip containing one CSV per county (e.g. "a_lvr_land_a.csv" for 臺北市/buy). Cache the zip per season since
+    // multiple properties/fallback attempts often need the same season.
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Task<byte[]>> SeasonZipCache = new();
+
+    static Task<byte[]> GetSeasonZip(string season, IHttpClientFactory httpFactory) =>
+        SeasonZipCache.GetOrAdd(season, s => DownloadSeasonZip(s, httpFactory));
+
+    static async Task<byte[]> DownloadSeasonZip(string season, IHttpClientFactory httpFactory)
+    {
+        var client = httpFactory.CreateClient();
+        client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0");
+        client.Timeout = TimeSpan.FromSeconds(60);
+        var url = $"https://plvr.land.moi.gov.tw/DownloadSeason?season={season}&fileName=lvr_landcsv.zip";
+        return await client.GetByteArrayAsync(url);
+    }
+
+    static async Task<List<Dictionary<string, string?>>> FetchRealEstate(string county, string keyword, int yearsBack, IHttpClientFactory httpFactory)
+    {
+        var today = DateTime.Today;
+
+        var seasons = new List<(int year, int season)>();
+        var cur = today;
+        var quarterCount = yearsBack * 4;
+        for (int i = 0; i < quarterCount; i++)
+        {
+            int s = (cur.Month - 1) / 3 + 1;
+            var entry = (cur.Year, s);
+            if (!seasons.Contains(entry)) seasons.Add(entry);
+            cur = cur.AddMonths(-3);
+        }
+
+        var entryName = $"{county.ToLowerInvariant()}_lvr_land_a.csv";
+        var records = new List<Dictionary<string, string?>>();
+        foreach (var (yr, s) in seasons)
+        {
+            var season = $"{yr - 1911}S{s}";
+            try
+            {
+                var zipBytes = await GetSeasonZip(season, httpFactory);
+                using var ms = new MemoryStream(zipBytes);
+                using var archive = new System.IO.Compression.ZipArchive(ms, System.IO.Compression.ZipArchiveMode.Read);
+                var entry = archive.GetEntry(entryName);
+                if (entry == null) continue;
+                using var reader = new StreamReader(entry.Open(), System.Text.Encoding.UTF8);
+                var csv = await reader.ReadToEndAsync();
+                var parsed = ParseCsv(csv, keyword, "buy", 50);
+                records.AddRange(parsed);
+                if (records.Count >= 150) break;
+            }
+            catch { }
+        }
+
+        return records.Take(150).ToList();
     }
 
     // ── API handlers ──────────────────────────────────────────────────────
@@ -547,6 +830,31 @@ function renderTable(records) {
         var props = LoadProperties();
         props.Add(prop);
         SaveProperties(props);
+        return Results.Ok();
+    }
+
+    static async Task<IResult> UpdateProperty(string id, PropertyRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.Name) || string.IsNullOrWhiteSpace(req.Address))
+            return Results.BadRequest("請填寫房產名稱與地址");
+
+        var props = LoadProperties();
+        var idx = props.FindIndex(p => p.Id == id);
+        if (idx < 0) return Results.NotFound("房產不存在");
+
+        props[idx] = props[idx] with
+        {
+            Name = req.Name, Address = req.Address, AreaPing = req.AreaPing, LandPing = req.LandPing,
+            BuildYear = req.BuildYear, TotalFloors = req.TotalFloors, PurchasePrice = req.PurchasePrice,
+            PurchaseDate = req.PurchaseDate ?? "", PropertyType = req.PropertyType ?? "其他", Notes = req.Notes ?? ""
+        };
+        SaveProperties(props);
+
+        var expenses = LoadExpenses();
+        for (int i = 0; i < expenses.Count; i++)
+            if (expenses[i].PropertyId == id) expenses[i] = expenses[i] with { PropertyName = req.Name };
+        SaveExpenses(expenses);
+
         return Results.Ok();
     }
 
@@ -574,7 +882,8 @@ function renderTable(records) {
         var exp = new PropertyExpense(
             Guid.NewGuid().ToString("N")[..8],
             id, prop.Name, req.Date ?? DateTime.Today.ToString("yyyy-MM-dd"),
-            req.Category ?? "其他", req.Amount, req.Vendor ?? "", req.Notes ?? "");
+            req.Category ?? "其他", req.Amount, req.Vendor ?? "", req.Notes ?? "",
+            req.ItemName ?? "", req.Brand ?? "");
 
         var expenses = LoadExpenses();
         expenses.Add(exp);
@@ -619,52 +928,6 @@ function renderTable(records) {
         return Results.Ok();
     }
 
-    static async Task<IResult> SearchRealEstate(string county, string tradeType, string? keyword, IHttpClientFactory httpFactory)
-    {
-        try
-        {
-            var today = DateTime.Today;
-            var client = httpFactory.CreateClient();
-            client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0");
-            client.Timeout = TimeSpan.FromSeconds(20);
-
-            var typeCode = tradeType == "rent" ? "b" : tradeType == "presell" ? "h" : "a";
-            var seasons = new List<(int year, int season)>();
-            var cur = today;
-            for (int i = 0; i < 8; i++)
-            {
-                int s = (cur.Month - 1) / 3 + 1;
-                var entry = (cur.Year, s);
-                if (!seasons.Contains(entry)) seasons.Add(entry);
-                cur = cur.AddMonths(-3);
-            }
-
-            var records = new List<Dictionary<string, string?>>();
-            foreach (var (yr, s) in seasons.Take(4))
-            {
-                int rocYear = yr - 1911;
-                var url = $"https://plvr.land.moi.gov.tw/DownloadSeason?season={rocYear}S{s}&type={typeCode}&county={county}";
-                try
-                {
-                    var csv = await client.GetStringAsync(url);
-                    var parsed = ParseCsv(csv, keyword, tradeType, 100);
-                    records.AddRange(parsed);
-                    if (records.Count >= 200) break;
-                }
-                catch { }
-            }
-
-            if (records.Count == 0)
-                return Results.Json(new { error = "查無資料，可能是網路問題或該地區無資料。" });
-
-            return Results.Json(new { records = records.Take(200) });
-        }
-        catch (Exception ex)
-        {
-            return Results.Json(new { error = $"查詢失敗：{ex.Message}" });
-        }
-    }
-
     static List<Dictionary<string, string?>> ParseCsv(string csv, string? keyword, string tradeType, int maxRows)
     {
         var lines = csv.Split('\n', StringSplitOptions.RemoveEmptyEntries);
@@ -678,7 +941,12 @@ function renderTable(records) {
         var headers = SplitCsvLine(lines[headerIdx]);
         var result = new List<Dictionary<string, string?>>();
 
-        for (int i = headerIdx + 1; i < lines.Length && result.Count < maxRows; i++)
+        var dataStart = headerIdx + 1;
+        // The row right after the Chinese header is an English translation header, not data — skip it.
+        if (dataStart < lines.Length && System.Text.RegularExpressions.Regex.IsMatch(SplitCsvLine(lines[dataStart]).FirstOrDefault() ?? "", "^[A-Za-z]"))
+            dataStart++;
+
+        for (int i = dataStart; i < lines.Length && result.Count < maxRows; i++)
         {
             var cols = SplitCsvLine(lines[i]);
             if (cols.Length < 5) continue;
@@ -689,7 +957,7 @@ function renderTable(records) {
 
             if (!string.IsNullOrEmpty(keyword))
             {
-                var addr = row.GetValueOrDefault("土地區段位置或建物區門牌") ?? row.GetValueOrDefault("租賃標的") ?? "";
+                var addr = row.GetValueOrDefault("土地位置建物門牌") ?? row.GetValueOrDefault("土地區段位置或建物區門牌") ?? row.GetValueOrDefault("租賃標的") ?? "";
                 var district = row.GetValueOrDefault("鄉鎮市區") ?? "";
                 if (!addr.Contains(keyword, StringComparison.OrdinalIgnoreCase) &&
                     !district.Contains(keyword, StringComparison.OrdinalIgnoreCase))
@@ -701,7 +969,7 @@ function renderTable(records) {
                 date = (rocY + 1911) + "/" + date[3..5] + "/" + date[5..7];
 
             var district2 = row.GetValueOrDefault("鄉鎮市區") ?? "";
-            var addr2 = row.GetValueOrDefault("土地區段位置或建物區門牌") ?? row.GetValueOrDefault("租賃標的") ?? "";
+            var addr2 = row.GetValueOrDefault("土地位置建物門牌") ?? row.GetValueOrDefault("土地區段位置或建物區門牌") ?? row.GetValueOrDefault("租賃標的") ?? "";
             var fullAddr = district2 + addr2;
 
             var totalPriceRaw = row.GetValueOrDefault("總價元") ?? row.GetValueOrDefault("租賃總額元") ?? "0";
@@ -795,13 +1063,15 @@ public record PropertyExpense(
     [property: JsonPropertyName("category")] string Category,
     [property: JsonPropertyName("amount")] long Amount,
     [property: JsonPropertyName("vendor")] string Vendor,
-    [property: JsonPropertyName("notes")] string Notes);
+    [property: JsonPropertyName("notes")] string Notes,
+    [property: JsonPropertyName("itemName")] string ItemName = "",
+    [property: JsonPropertyName("brand")] string Brand = "");
 
 public record PropertyRequest(
     string Name, string Address, decimal AreaPing, decimal LandPing, int BuildYear, int TotalFloors, long PurchasePrice,
     string? PurchaseDate, string? PropertyType, string? Notes);
 
 public record PropertyExpenseRequest(
-    string? Date, string? Category, long Amount, string? Vendor, string? Notes);
+    string? Date, string? Category, long Amount, string? Vendor, string? Notes, string? ItemName, string? Brand);
 
 public record PropertySaleRequest(long SalePrice, string? SaleDate, string? SaleNotes);

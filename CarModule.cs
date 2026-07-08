@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 
 public static class CarModule
 {
-    static readonly string DataDir = Path.Combine(AppContext.BaseDirectory, "data");
+    static readonly string DataDir = Environment.GetEnvironmentVariable("DATA_DIR") ?? Path.Combine(AppContext.BaseDirectory, "data");
     static readonly string CarsFile = Path.Combine(DataDir, "cars.json");
     static readonly string CarExpensesFile = Path.Combine(DataDir, "car_expenses.json");
     static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };
@@ -14,9 +14,11 @@ public static class CarModule
         app.MapGet("/car/add", AddCarPage);
         app.MapGet("/car/expenses", ExpensesPage);
         app.MapGet("/car/expenses/add", AddExpensePage);
+        app.MapGet("/car/{id}/edit", EditCarPage);
         app.MapGet("/car/{id}/sell", SellCarPage);
 
         app.MapPost("/api/car", AddCar);
+        app.MapPut("/api/car/{id}", UpdateCar);
         app.MapDelete("/api/car/{id}", DeleteCar);
         app.MapPost("/api/car/expenses", AddExpense);
         app.MapDelete("/api/car/expenses/{id}", DeleteExpense);
@@ -28,7 +30,10 @@ public static class CarModule
 
     static async Task CarsPage(HttpContext ctx)
     {
-        var cars = LoadCars();
+        var cars = LoadCars()
+            .OrderBy(c => c.SalePrice.HasValue && c.SalePrice > 0 ? 1 : 0)
+            .ThenByDescending(c => c.PurchaseDate)
+            .ToList();
         var expenses = LoadExpenses();
         var totalExpense = expenses.Sum(e => e.Amount);
 
@@ -74,6 +79,7 @@ public static class CarModule
     </div>
     <a href='/car/expenses/add?carId={c.Id}' class='btn btn-sm'>新增花費</a>
     <a href='/car/expenses?carId={c.Id}' class='btn btn-sm btn-outline'>花費紀錄</a>
+    <a href='/car/{c.Id}/edit' class='btn btn-sm btn-outline'>編輯</a>
     {sellBtn}
     <button class='btn btn-sm btn-danger' onclick='delCar(""{c.Id}"")'>刪除</button>
   </div>
@@ -91,9 +97,30 @@ public static class CarModule
 </div>";
             }));
 
+        var exportRows = string.Join("", cars.Select(c =>
+        {
+            var carExp = expenses.Where(e => e.CarId == c.Id).Sum(e => e.Amount);
+            var isSold = c.SalePrice.HasValue && c.SalePrice > 0;
+            return $@"<tr>
+  <td>{System.Net.WebUtility.HtmlEncode(c.Brand)}</td>
+  <td>{System.Net.WebUtility.HtmlEncode(c.Model)}</td>
+  <td>{System.Net.WebUtility.HtmlEncode(c.PlateNo)}</td>
+  <td>{c.Year}</td>
+  <td>{System.Net.WebUtility.HtmlEncode(c.Color)}</td>
+  <td>{System.Net.WebUtility.HtmlEncode(c.Owner)}</td>
+  <td>{c.PurchasePrice}</td>
+  <td>{c.PurchaseDate}</td>
+  <td>{carExp}</td>
+  <td>{(isSold ? c.SalePrice!.Value.ToString() : "")}</td>
+  <td>{(isSold ? c.SaleDate : "")}</td>
+  <td>{System.Net.WebUtility.HtmlEncode(c.Notes)}</td>
+</tr>";
+        }));
+
         var body = $@"
 <div class='actions' style='margin-bottom:16px'>
   <h1 style='margin:0;flex:1'>🚗 車輛管理</h1>
+  <button class='btn btn-sm btn-outline' onclick=""exportTableToExcel('car-export-table','車輛管理',{{btn:this}})"">⬇ 下載Excel</button>
   <a href='/car/expenses' class='btn btn-outline'>花費紀錄</a>
   <a href='/car/add' class='btn'>＋ 新增車輛</a>
 </div>
@@ -102,6 +129,10 @@ public static class CarModule
   <div class='card'><div class='lbl'>累計花費合計</div><div class='val pos'>{totalExpense:N0} 元</div></div>
 </div>" : "")}
 {cards}
+<table id='car-export-table' style='display:none'>
+<thead><tr><th>品牌</th><th>型號</th><th>車牌</th><th>出廠年份</th><th>顏色</th><th>車主</th><th>購入價格</th><th>購入日期</th><th>累計花費</th><th>賣出價格</th><th>賣出日期</th><th>備註</th></tr></thead>
+<tbody>{exportRows}</tbody>
+</table>
 <div id='msg'></div>
 <script>
 async function delCar(id) {{
@@ -216,6 +247,111 @@ function showMsg(m,t){document.getElementById('msg').innerHTML=`<div class='aler
 
         ctx.Response.ContentType = "text/html; charset=utf-8";
         await ctx.Response.WriteAsync(SharedLayout.Page("新增車輛", "car", "add", body));
+    }
+
+    static async Task EditCarPage(string id, HttpContext ctx)
+    {
+        var cars = LoadCars();
+        var car = cars.FirstOrDefault(c => c.Id == id);
+        if (car == null) { ctx.Response.StatusCode = 404; await ctx.Response.WriteAsync("車輛不存在"); return; }
+
+        var body = $@"
+<h1>🚗 編輯車輛</h1>
+<div class='form-card'>
+<div id='msg'></div>
+<div class='row2'>
+  <div class='field'>
+    <label>品牌</label>
+    <input id='brand' value='{System.Net.WebUtility.HtmlEncode(car.Brand)}'>
+  </div>
+  <div class='field'>
+    <label>型號</label>
+    <input id='model' value='{System.Net.WebUtility.HtmlEncode(car.Model)}'>
+  </div>
+</div>
+<div class='row3'>
+  <div class='field'>
+    <label>車牌號碼</label>
+    <input id='plateNo' value='{System.Net.WebUtility.HtmlEncode(car.PlateNo)}'>
+  </div>
+  <div class='field'>
+    <label>出廠年份</label>
+    <input type='number' id='year' value='{car.Year}' min='1990' max='2030'>
+  </div>
+  <div class='field'>
+    <label>顏色</label>
+    <input id='color' value='{System.Net.WebUtility.HtmlEncode(car.Color)}'>
+  </div>
+</div>
+<div class='field'>
+  <label>車主</label>
+  <input id='owner' value='{System.Net.WebUtility.HtmlEncode(car.Owner)}'>
+</div>
+<div style='margin:0 0 8px;font-weight:600;color:#555;font-size:.9rem'>價格資訊</div>
+<div class='row3'>
+  <div class='field'>
+    <label>汽車牌價（元）</label>
+    <input type='number' id='listPrice' value='{car.ListPrice}' oninput='calcPurchase()'>
+  </div>
+  <div class='field'>
+    <label>折讓金額（元）</label>
+    <input type='number' id='discount' value='{car.Discount}' oninput='calcPurchase()'>
+  </div>
+  <div class='field'>
+    <label>頭款金額（元）</label>
+    <input type='number' id='downPayment' value='{car.DownPayment}'>
+  </div>
+</div>
+<div class='row2'>
+  <div class='field'>
+    <label>購入價格（元）</label>
+    <input type='number' id='purchasePrice' value='{car.PurchasePrice}'>
+  </div>
+  <div class='field'>
+    <label>購入日期</label>
+    <input type='date' id='purchaseDate' value='{car.PurchaseDate}'>
+  </div>
+</div>
+<div class='field'>
+  <label>備註</label>
+  <textarea id='notes' rows='2'>{System.Net.WebUtility.HtmlEncode(car.Notes)}</textarea>
+</div>
+<div class='actions'>
+  <button class='btn' onclick='submit()'>儲存變更</button>
+  <a href='/car' class='btn btn-outline'>取消</a>
+</div>
+</div>
+<script>
+function calcPurchase() {{
+  const list = parseFloat(document.getElementById('listPrice').value) || 0;
+  const disc = parseFloat(document.getElementById('discount').value) || 0;
+  if (list > 0) document.getElementById('purchasePrice').value = Math.max(0, list - disc) || '';
+}}
+async function submit() {{
+  const req = {{
+    brand: document.getElementById('brand').value.trim(),
+    model: document.getElementById('model').value.trim(),
+    plateNo: document.getElementById('plateNo').value.trim(),
+    year: parseInt(document.getElementById('year').value) || 0,
+    color: document.getElementById('color').value.trim(),
+    owner: document.getElementById('owner').value.trim(),
+    listPrice: parseFloat(document.getElementById('listPrice').value) || 0,
+    discount: parseFloat(document.getElementById('discount').value) || 0,
+    downPayment: parseFloat(document.getElementById('downPayment').value) || 0,
+    purchasePrice: parseFloat(document.getElementById('purchasePrice').value) || 0,
+    purchaseDate: document.getElementById('purchaseDate').value,
+    notes: document.getElementById('notes').value.trim()
+  }};
+  if (!req.brand || !req.model || !req.plateNo) {{ showMsg('請填寫品牌、型號與車牌', 'err'); return; }}
+  const r = await fetch('/api/car/{id}', {{method:'PUT', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify(req)}});
+  if (r.ok) {{ showMsg('✓ 已儲存！', 'ok'); setTimeout(() => location.href='/car', 1200); }}
+  else {{ const t = await r.text(); showMsg(t || '儲存失敗', 'err'); }}
+}}
+function showMsg(m,t){{document.getElementById('msg').innerHTML=`<div class='alert ${{t}}'>${{m}}</div>`;}}
+</script>";
+
+        ctx.Response.ContentType = "text/html; charset=utf-8";
+        await ctx.Response.WriteAsync(SharedLayout.Page("編輯車輛", "car", "list", body));
     }
 
     static async Task SellCarPage(string id, HttpContext ctx)
@@ -344,10 +480,11 @@ function showMsg(m,t){{document.getElementById('msg').innerHTML=`<div class='ale
     <a href='/car' style='color:#888;font-size:.88rem;text-decoration:none'>← 返回車輛列表</a>
     <h1 style='margin:4px 0 0'>🚗 車輛花費紀錄</h1>
   </div>
+  <button class='btn btn-sm btn-outline' onclick=""exportTableToExcel('exp-table','車輛花費紀錄',{{skipCols:[6],btn:this}})"">⬇ 下載Excel</button>
   <a href='/car/expenses/add' class='btn'>＋ 新增花費</a>
 </div>
 <div class='cards'>
-  <div class='card'><div class='lbl'>篩選後花費</div><div class='val pos'>{filtered.Sum(e => e.Amount):N0} 元</div></div>
+  <div class='card'><div class='lbl'>篩選後花費</div><div class='val pos' id='exp-filtered'>{filtered.Sum(e => e.Amount):N0} 元</div></div>
   <div class='card'><div class='lbl'>總花費</div><div class='val'>{total:N0} 元</div></div>
   {string.Join("", catTotals)}
 </div>
@@ -359,11 +496,16 @@ function showMsg(m,t){{document.getElementById('msg').innerHTML=`<div class='ale
   </select>
 </div>
 <div class='table-wrap'>
-<table>
+<table id='exp-table'>
 <thead><tr>
   <th>日期</th><th>車輛</th><th>類別</th><th style='text-align:right'>金額</th><th>店家／廠商</th><th>備註</th><th></th>
 </tr></thead>
 <tbody>{rows}</tbody>
+<tfoot><tr>
+  <td colspan='3'>篩選合計</td>
+  <td style='text-align:right;font-weight:600' id='exp-tf-total'>{filtered.Sum(e => e.Amount):N0}</td>
+  <td colspan='3'></td>
+</tr></tfoot>
 </table>
 </div>
 <div id='msg' style='margin-top:12px'></div>
@@ -374,6 +516,17 @@ async function del(id) {{
   if (r.ok) location.reload();
   else document.getElementById('msg').innerHTML = '<div class=""alert err"">刪除失敗</div>';
 }}
+initTable('exp-table', {{
+  cols: 7,
+  noFilter: [3, 6],
+  sumCols: [{{col: 3, id: 'exp-tf-total'}}],
+  onFilter: function(vis) {{
+    let sum = 0;
+    for (const r of vis) sum += parseFloat(r.cells[3].textContent.replace(/,/g,'')) || 0;
+    const el = document.getElementById('exp-filtered');
+    if (el) el.textContent = Math.round(sum).toLocaleString('zh-TW') + ' 元';
+  }}
+}});
 </script>";
 
         ctx.Response.ContentType = "text/html; charset=utf-8";
@@ -480,6 +633,33 @@ function showMsg(m,t){{document.getElementById('msg').innerHTML=`<div class='ale
         var cars = LoadCars();
         cars.Add(car);
         SaveCars(cars);
+        return Results.Ok();
+    }
+
+    static async Task<IResult> UpdateCar(string id, CarRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.Brand) || string.IsNullOrWhiteSpace(req.Model) || string.IsNullOrWhiteSpace(req.PlateNo))
+            return Results.BadRequest("請填寫品牌、型號與車牌");
+
+        var cars = LoadCars();
+        var idx = cars.FindIndex(c => c.Id == id);
+        if (idx < 0) return Results.NotFound("車輛不存在");
+
+        cars[idx] = cars[idx] with
+        {
+            Brand = req.Brand, Model = req.Model, PlateNo = req.PlateNo, Year = req.Year,
+            Color = req.Color ?? "", Owner = req.Owner ?? "", ListPrice = req.ListPrice, Discount = req.Discount,
+            DownPayment = req.DownPayment, PurchasePrice = req.PurchasePrice, PurchaseDate = req.PurchaseDate ?? "",
+            Notes = req.Notes ?? ""
+        };
+        SaveCars(cars);
+
+        var expenses = LoadExpenses();
+        var carName = $"{req.Brand} {req.Model}";
+        for (int i = 0; i < expenses.Count; i++)
+            if (expenses[i].CarId == id) expenses[i] = expenses[i] with { CarName = carName };
+        SaveExpenses(expenses);
+
         return Results.Ok();
     }
 

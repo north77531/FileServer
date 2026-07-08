@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 
 public static class DebtModule
 {
-    static readonly string DataDir = Path.Combine(AppContext.BaseDirectory, "data");
+    static readonly string DataDir = Environment.GetEnvironmentVariable("DATA_DIR") ?? Path.Combine(AppContext.BaseDirectory, "data");
     static readonly string DebtsFile = Path.Combine(DataDir, "debts.json");
     static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };
 
@@ -12,10 +12,12 @@ public static class DebtModule
         app.MapGet("/debt", ListPage);
         app.MapGet("/debt/add", AddPage);
         app.MapPost("/api/debt", AddLoan);
+        app.MapPut("/api/debt/{id}", UpdateLoan);
         app.MapDelete("/api/debt/{id}", DeleteLoan);
         app.MapPatch("/api/debt/{id}/balance", UpdateBalance);
         app.MapPost("/api/debt/{id}/rate", UpdateRate);
         app.MapGet("/api/debt/loans", GetLoans);
+        app.MapGet("/debt/{id}/edit", EditPage);
     }
 
     // ── List page ──────────────────────────────────────────────────────────
@@ -50,6 +52,7 @@ public static class DebtModule
   <td>{l.EndDate}</td>
   <td>
     <div class='actions'>
+      <a href='/debt/{l.Id}/edit' class='btn btn-sm btn-outline'>編輯</a>
       <button class='btn btn-sm btn-outline' onclick='saveBalance(""{l.Id}"")'>更新餘額</button>
       <button class='btn btn-sm btn-danger' onclick='del(""{l.Id}"")'>刪除</button>
     </div>
@@ -81,7 +84,7 @@ public static class DebtModule
     </div>
   </td>
 </tr>
-<tr id='rateDetail-{l.Id}' style='display:none'>
+<tr id='rateDetail-{l.Id}' style='display:none' data-nofilter='1'>
   <td colspan='15' style='background:#fffbe6;border-bottom:2px solid #e6d87a;padding:0'>
     <div style='padding:14px 18px'>
       <div id='rateHist-{l.Id}'></div>
@@ -117,9 +120,12 @@ public static class DebtModule
 </div>
 
 {(regularLoans.Count > 0 ? $@"
-<h2>💳 一般貸款</h2>
+<div class='actions'>
+  <h2 style='flex:1'>💳 一般貸款</h2>
+  <button class='btn btn-sm btn-outline' onclick=""exportTableToExcel('reg-table','一般貸款',{{skipCols:[11],btn:this}})"">⬇ 下載Excel</button>
+</div>
 <div class='table-wrap'>
-<table>
+<table id='reg-table'>
 <thead><tr>
   <th>貸款名稱</th><th>類型</th><th>銀行</th><th>借款人</th>
   <th class='num'>原始金額</th><th class='num'>目前餘額</th>
@@ -127,13 +133,25 @@ public static class DebtModule
   <th>起始日</th><th>預計結清</th><th></th>
 </tr></thead>
 <tbody>{regRows}</tbody>
+<tfoot><tr>
+  <td colspan='4'>篩選合計</td>
+  <td class='num' id='rt-principal'>—</td>
+  <td class='num' id='rt-balance'>—</td>
+  <td class='num'></td>
+  <td class='num' id='rt-monthly'>—</td>
+  <td class='num' id='rt-interest'>—</td>
+  <td></td><td></td><td></td>
+</tr></tfoot>
 </table>
 </div>" : "")}
 
 {(stockLoans.Count > 0 ? $@"
-<h2>📊 股票質押</h2>
+<div class='actions'>
+  <h2 style='flex:1'>📊 股票質押</h2>
+  <button class='btn btn-sm btn-outline' onclick=""exportTableToExcel('stock-table','股票質押',{{skipCols:[14],btn:this}})"">⬇ 下載Excel</button>
+</div>
 <div class='table-wrap'>
-<table>
+<table id='stock-table'>
 <thead><tr>
   <th>名稱</th><th>機構</th><th>借款人</th><th>股票</th>
   <th class='num'>張數</th><th class='num'>即時股價</th><th class='num'>市值</th>
@@ -142,6 +160,11 @@ public static class DebtModule
   <th class='num'>維持率</th><th>起息日</th><th></th>
 </tr></thead>
 <tbody>{stockRows}</tbody>
+<tfoot><tr>
+  <td colspan='7'>篩選合計</td>
+  <td class='num' id='st-pledge'>—</td>
+  <td colspan='7'></td>
+</tr></tfoot>
 </table>
 </div>
 <p style='font-size:.8rem;color:#999;margin-top:8px'>維持率 = 市值 ÷ 應償還金額 × 100%。一般追繳線：130%，警戒線：140%，請依各券商規定為準。</p>" : "")}
@@ -169,14 +192,14 @@ function daysDiff(from, to) {{
   return Math.max(0, Math.floor((to - f) / 86400000));
 }}
 
-function fmt(n) {{ return Math.round(n).toLocaleString('zh-TW'); }}
+function fmt(n) {{ return (isNaN(n) || n == null) ? '0' : Math.round(n).toLocaleString('zh-TW'); }}
 function fmtD(n) {{ return n.toFixed(1) + '%'; }}
 
 // ── 計算一般貸款餘額 ─────────────────────────────────────────────────────
 function calcBalance(loan) {{
   const r = loan.rate / 100 / 12;
   const elapsed = monthsDiff(loan.startDate, today);
-  if (elapsed <= 0) return loan.principal;
+  if (!loan.startDate || isNaN(elapsed) || elapsed <= 0) return loan.balance || loan.principal;
 
   let P = loan.principal;
   let N = loan.totalMonths || 0;
@@ -218,7 +241,7 @@ const computedBalances = {{}};
 function updateRegularLoans() {{
   let totalBal = 0, totalMonthly = 0, totalInt = 0;
   for (const l of loans.filter(x => x.loanType !== '股票質押')) {{
-    const bal = calcBalance(l);
+    const bal = isNaN(calcBalance(l)) ? (l.balance || l.principal || 0) : calcBalance(l);
     computedBalances[l.id] = bal;
     const balEl = document.getElementById('bal-' + l.id);
     if (balEl) balEl.innerHTML = '<strong>' + fmt(bal) + '</strong>';
@@ -410,6 +433,43 @@ async function del(id) {{
 
 updateRegularLoans();
 updateStockLoans();
+
+// 初始化篩選（initTable 由 SharedLayout.Page 注入）
+function debtPn(s) {{ return parseFloat(String(s || '').replace(/,/g, '')) || 0; }}
+function debtSet(id, v) {{ const el = document.getElementById(id); if (el) el.textContent = fmt(v); }}
+function debtCard(id, v) {{ const el = document.getElementById(id); if (el) el.textContent = fmt(v) + ' 元'; }}
+
+initTable('reg-table', {{
+  cols: 12,
+  noFilter: [6, 11],
+  onFilter: function(vis) {{
+    let totP = 0, totB = 0, totM = 0, totI = 0;
+    for (const r of vis) {{
+      totP += debtPn(r.cells[4] ? r.cells[4].textContent : '');
+      totB += debtPn(r.cells[5] ? r.cells[5].textContent : '');
+      totM += debtPn(r.cells[7] ? r.cells[7].textContent : '');
+      totI += debtPn(r.cells[8] ? r.cells[8].textContent : '');
+    }}
+    debtSet('rt-principal', totP);
+    debtSet('rt-balance', totB);
+    debtSet('rt-monthly', totM);
+    debtSet('rt-interest', totI);
+    debtCard('s-balance', totB);
+    debtCard('s-monthly', totM);
+    debtCard('s-interest', totI);
+  }}
+}});
+
+initTable('stock-table', {{
+  cols: 15,
+  noFilter: [5, 6, 8, 9, 10, 11, 12, 14],
+  onFilter: function(vis) {{
+    let tot = 0;
+    for (const r of vis) tot += debtPn(r.cells[7] ? r.cells[7].textContent : '');
+    debtSet('st-pledge', tot);
+    debtCard('s-pledge', tot);
+  }}
+}});
 </script>";
 
         ctx.Response.ContentType = "text/html; charset=utf-8";
@@ -863,6 +923,256 @@ document.getElementById('s-startDate').value = todayStr;
         await ctx.Response.WriteAsync(SharedLayout.Page("新增貸款", "debt", "add", body));
     }
 
+    // ── Edit page ─────────────────────────────────────────────────────────
+
+    static async Task EditPage(string id, HttpContext ctx)
+    {
+        var loans = LoadLoans();
+        var loan = loans.FirstOrDefault(l => l.Id == id);
+        if (loan == null) { ctx.Response.StatusCode = 404; await ctx.Response.WriteAsync("貸款不存在"); return; }
+
+        var loanJson = JsonSerializer.Serialize(loan, JsonOpts);
+
+        var body = $@"
+<div>
+  <a href='/debt' style='color:#888;font-size:.88rem;text-decoration:none'>← 返回貸款列表</a>
+  <h1 style='margin:4px 0 20px'>💳 編輯貸款</h1>
+</div>
+<div class='form-card' style='max-width:680px'>
+<div id='msg'></div>
+
+<div class='row2'>
+  <div class='field'>
+    <label>貸款類型</label>
+    <select id='loanType' onchange='onTypeChange()'>
+      <option value='房貸'>房貸</option>
+      <option value='車貸'>車貸</option>
+      <option value='信貸'>信貸</option>
+      <option value='股票質押'>股票質押</option>
+      <option value='其他'>其他</option>
+    </select>
+  </div>
+  <div class='field'>
+    <label>借款人</label>
+    <input id='borrower' placeholder='借款人姓名'>
+  </div>
+</div>
+<div class='row2'>
+  <div class='field'>
+    <label>貸款名稱</label>
+    <input id='name' placeholder='如：自住房貸'>
+  </div>
+  <div class='field'>
+    <label>銀行／機構</label>
+    <input id='bank' placeholder='如：國泰世華銀行'>
+  </div>
+</div>
+
+<div id='regularFields'>
+  <div class='row3'>
+    <div class='field'>
+      <label>原始貸款金額（元）</label>
+      <input type='number' id='principal' oninput='onRegularInput()'>
+    </div>
+    <div class='field'>
+      <label>年利率（%）</label>
+      <input type='number' id='rate' step='0.001' oninput='onRegularInput()'>
+    </div>
+    <div class='field'>
+      <label>貸款總期數（月）</label>
+      <input type='number' id='totalMonths' oninput='onRegularInput()'>
+    </div>
+  </div>
+  <div class='row2'>
+    <div class='field'>
+      <label>還本方式</label>
+      <select id='repaymentMethod' onchange='onRegularInput()'>
+        <option value='本息均攤'>本息均攤</option>
+        <option value='本金均攤'>本金均攤</option>
+        <option value='只還利息'>只還利息</option>
+        <option value='其他'>其他</option>
+      </select>
+    </div>
+    <div class='field'>
+      <label>每月還款金額（元）</label>
+      <input type='number' id='monthlyPayment' placeholder='可留空自動計算'>
+    </div>
+  </div>
+
+  <div id='graceFields' style='display:none'>
+    <div style='background:#fff9e6;border:1px solid #e6d87a;border-radius:6px;padding:12px 14px;margin-bottom:16px'>
+      <strong>🏠 房貸寬限期設定</strong>
+      <div class='row2' style='margin-top:10px'>
+        <div class='field' style='margin-bottom:0'>
+          <label>寬限期月數</label>
+          <input type='number' id='gracePeriodMonths' min='0' oninput='onGraceInput()'>
+        </div>
+        <div class='field' style='margin-bottom:0'>
+          <label>寬限期結束日</label>
+          <input type='date' id='gracePeriodEndDate'>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class='row2'>
+    <div class='field'>
+      <label>起始日期</label>
+      <input type='date' id='startDate' oninput='onRegularInput()'>
+    </div>
+    <div class='field'>
+      <label>預計結清日期</label>
+      <input type='date' id='endDate'>
+    </div>
+  </div>
+  <div class='field'>
+    <label>目前餘額（元）</label>
+    <input type='number' id='balance'>
+  </div>
+</div>
+
+<div id='stockFields' style='display:none'>
+  <div style='background:#f0f4ff;border:1px solid #c0d0f0;border-radius:6px;padding:12px 14px;margin-bottom:16px'>
+    <strong>📊 股票資訊</strong>
+    <div class='row3' style='margin-top:10px'>
+      <div class='field' style='margin-bottom:0'><label>股號</label><input id='stockCode'></div>
+      <div class='field' style='margin-bottom:0'><label>股名</label><input id='stockName'></div>
+      <div class='field' style='margin-bottom:0'><label>張數</label><input type='number' id='stockShares'></div>
+    </div>
+    <div class='row3' style='margin-top:10px'>
+      <div class='field' style='margin-bottom:0'><label>股價</label><input type='number' id='stockPrice' step='0.01'></div>
+      <div class='field' style='margin-bottom:0'><label>起息日</label><input type='date' id='interestStartDate'></div>
+    </div>
+  </div>
+  <div style='background:#fff5f5;border:1px solid #f5b8b8;border-radius:6px;padding:12px 14px;margin-bottom:16px'>
+    <strong>💰 借款資訊</strong>
+    <div class='row3' style='margin-top:10px'>
+      <div class='field' style='margin-bottom:0'><label>借款金額（元）</label><input type='number' id='s-principal'></div>
+      <div class='field' style='margin-bottom:0'><label>借款利率（%）</label><input type='number' id='s-rate' step='0.001'></div>
+      <div class='field' style='margin-bottom:0'><label>起始日期</label><input type='date' id='s-startDate'></div>
+    </div>
+  </div>
+</div>
+
+<div class='field'>
+  <label>備註</label>
+  <textarea id='notes' rows='2'></textarea>
+</div>
+<div class='actions'>
+  <button class='btn' onclick='submitForm()'>儲存修改</button>
+  <a href='/debt' class='btn btn-outline'>取消</a>
+</div>
+</div>
+
+<script>
+const loan = {loanJson};
+const isStock = () => document.getElementById('loanType').value === '股票質押';
+
+function onTypeChange() {{
+  const type = document.getElementById('loanType').value;
+  const isS = type === '股票質押';
+  document.getElementById('regularFields').style.display = isS ? 'none' : '';
+  document.getElementById('stockFields').style.display = isS ? '' : 'none';
+  document.getElementById('graceFields').style.display = (type === '房貸' && !isS) ? '' : 'none';
+}}
+
+function onRegularInput() {{
+  const sd = document.getElementById('startDate').value;
+  const nm = parseInt(document.getElementById('totalMonths').value) || 0;
+  if (sd && nm > 0) {{
+    const ed = new Date(sd); ed.setMonth(ed.getMonth() + nm);
+    document.getElementById('endDate').value = ed.toISOString().slice(0,10);
+  }}
+}}
+
+function onGraceInput() {{
+  const months = parseInt(document.getElementById('gracePeriodMonths').value) || 0;
+  const start = document.getElementById('startDate').value;
+  if (start && months > 0) {{
+    const d = new Date(start); d.setMonth(d.getMonth() + months);
+    document.getElementById('gracePeriodEndDate').value = d.toISOString().slice(0,10);
+  }}
+}}
+
+function populate() {{
+  const sv = (id, v) => {{ const el = document.getElementById(id); if (el && v != null) el.value = v; }};
+  sv('loanType', loan.loanType);
+  onTypeChange();
+  sv('borrower', loan.borrower);
+  sv('name', loan.name);
+  sv('bank', loan.bank);
+  sv('notes', loan.notes);
+  if (loan.loanType !== '股票質押') {{
+    sv('principal', loan.principal);
+    sv('rate', loan.rate);
+    sv('totalMonths', loan.totalMonths);
+    sv('repaymentMethod', loan.repaymentMethod);
+    sv('monthlyPayment', loan.monthlyPayment || '');
+    sv('startDate', loan.startDate);
+    sv('endDate', loan.endDate);
+    sv('balance', loan.balance);
+    sv('gracePeriodMonths', loan.gracePeriodMonths || '');
+    sv('gracePeriodEndDate', loan.gracePeriodEndDate);
+  }} else {{
+    sv('stockCode', loan.stockCode);
+    sv('stockName', loan.stockName);
+    sv('stockShares', loan.stockShares);
+    sv('stockPrice', loan.stockPrice);
+    sv('interestStartDate', loan.interestStartDate);
+    sv('s-principal', loan.principal);
+    sv('s-rate', loan.rate);
+    sv('s-startDate', loan.startDate);
+  }}
+}}
+
+async function submitForm() {{
+  const type = document.getElementById('loanType').value;
+  const isS = type === '股票質押';
+  const gv = id => {{ const el = document.getElementById(id); return el ? el.value : ''; }};
+  const gn = id => parseFloat(gv(id)) || 0;
+  const gi = id => parseInt(gv(id)) || 0;
+
+  const req = {{
+    name: gv('name').trim(),
+    bank: gv('bank').trim(),
+    borrower: gv('borrower').trim(),
+    loanType: type,
+    principal: isS ? gn('s-principal') : gn('principal'),
+    rate: isS ? gn('s-rate') : gn('rate'),
+    startDate: isS ? gv('s-startDate') : gv('startDate'),
+    endDate: gv('endDate'),
+    notes: gv('notes').trim(),
+    repaymentMethod: isS ? '只還利息' : gv('repaymentMethod'),
+    monthlyPayment: gn('monthlyPayment'),
+    totalMonths: gi('totalMonths'),
+    gracePeriodMonths: gi('gracePeriodMonths'),
+    gracePeriodEndDate: gv('gracePeriodEndDate'),
+    balance: gn('balance'),
+    stockCode: isS ? gv('stockCode').trim() : '',
+    stockName: isS ? gv('stockName').trim() : '',
+    stockPrice: isS ? gn('stockPrice') : 0,
+    stockShares: isS ? gi('stockShares') : 0,
+    interestStartDate: isS ? (gv('interestStartDate') || gv('s-startDate')) : ''
+  }};
+
+  if (!req.name || !req.bank || req.principal <= 0) {{
+    showMsg('請填寫貸款名稱、銀行及借款金額', 'err'); return;
+  }}
+
+  const r = await fetch('/api/debt/{id}', {{method:'PUT', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify(req)}});
+  if (r.ok) {{ showMsg('✓ 已儲存！', 'ok'); setTimeout(() => location.href='/debt', 1200); }}
+  else {{ const t = await r.text(); showMsg(t || '儲存失敗', 'err'); }}
+}}
+
+function showMsg(m,t){{document.getElementById('msg').innerHTML=`<div class='alert ${{t}}'>${{m}}</div>`;}}
+
+populate();
+</script>";
+
+        ctx.Response.ContentType = "text/html; charset=utf-8";
+        await ctx.Response.WriteAsync(SharedLayout.Page("編輯貸款", "debt", "list", body));
+    }
+
     // ── API ───────────────────────────────────────────────────────────────
 
     static async Task<IResult> AddLoan(LoanRequest req)
@@ -886,6 +1196,44 @@ document.getElementById('s-startDate').value = todayStr;
 
         var loans = LoadLoans();
         loans.Add(loan);
+        SaveLoans(loans);
+        return Results.Ok();
+    }
+
+    static async Task<IResult> UpdateLoan(string id, LoanRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.Name) || string.IsNullOrWhiteSpace(req.Bank) || req.Principal <= 0)
+            return Results.BadRequest("請填寫必要資料");
+
+        var loans = LoadLoans();
+        var idx = loans.FindIndex(l => l.Id == id);
+        if (idx < 0) return Results.NotFound("貸款不存在");
+
+        var existing = loans[idx];
+        var balance = req.Balance > 0 ? req.Balance : req.Principal;
+        loans[idx] = existing with
+        {
+            Name = req.Name,
+            Bank = req.Bank,
+            LoanType = req.LoanType ?? existing.LoanType,
+            Principal = req.Principal,
+            Balance = balance,
+            Rate = req.Rate,
+            StartDate = req.StartDate ?? "",
+            EndDate = req.EndDate ?? "",
+            Notes = req.Notes ?? "",
+            RepaymentMethod = req.RepaymentMethod ?? existing.RepaymentMethod,
+            MonthlyPayment = req.MonthlyPayment,
+            TotalMonths = req.TotalMonths,
+            GracePeriodMonths = req.GracePeriodMonths,
+            GracePeriodEndDate = req.GracePeriodEndDate ?? "",
+            StockCode = req.StockCode ?? "",
+            StockName = req.StockName ?? "",
+            StockPrice = req.StockPrice,
+            StockShares = req.StockShares,
+            InterestStartDate = req.InterestStartDate ?? "",
+            Borrower = string.IsNullOrWhiteSpace(req.Borrower) ? existing.Borrower : req.Borrower
+        };
         SaveLoans(loans);
         return Results.Ok();
     }
