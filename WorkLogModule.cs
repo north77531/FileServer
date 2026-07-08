@@ -27,6 +27,9 @@ public static class WorkLogModule
     const string CustomerTagEpicName = "客戶標籤";
     const string CustomerTagModule = "SD";
 
+    // Dashboard → 工作紀錄明細 深連結時，代表「該欄位為空白」的保留值
+    const string BlankMarker = "__BLANK__";
+
     static readonly string[] SummaryOptions =
         ["Change Requests", "Issue Solving", "Operation Tickets", "Training & Enablement"];
     static readonly string[] EpicCategoryOptions =
@@ -106,6 +109,19 @@ public static class WorkLogModule
         var logs = LoadLogs().OrderByDescending(l => l.PlanStartDate).ThenByDescending(l => l.CreatedAt).ToList();
         var totalMin = logs.Sum(l => l.Minutes);
         var linkFilter = ParseDateFilter(ctx);
+        var initEpicName = ctx.Request.Query["epicName"].ToString();
+        var initSummary = ctx.Request.Query["summary"].ToString();
+        var initModule = ctx.Request.Query["module"].ToString();
+        var initIssuer = ctx.Request.Query["issuer"].ToString();
+
+        string DimLabel(string v) => v == BlankMarker ? "(空白)" : v;
+        var linkInfoParts = new List<string>();
+        if (!string.IsNullOrEmpty(initEpicName)) linkInfoParts.Add("Epic Name = " + DimLabel(initEpicName));
+        if (!string.IsNullOrEmpty(initSummary)) linkInfoParts.Add("Summary = " + DimLabel(initSummary));
+        if (!string.IsNullOrEmpty(initModule)) linkInfoParts.Add("Module = " + DimLabel(initModule));
+        if (!string.IsNullOrEmpty(initIssuer)) linkInfoParts.Add("Request Issuer = " + DimLabel(initIssuer));
+        var linkInfoHtml = linkInfoParts.Count == 0 ? "" :
+            $"<div id='link-filter-info' style='color:#0055cc;font-size:.82rem;margin:-4px 0 10px'>🔗 從 Dashboard 篩選：{System.Net.WebUtility.HtmlEncode(string.Join("、", linkInfoParts))}</div>";
 
         var rows = logs.Count == 0
             ? "<tr><td colspan='9' style='text-align:center;padding:30px;color:#999'>尚無工作紀錄</td></tr>"
@@ -150,8 +166,9 @@ public static class WorkLogModule
     <select id='filterWeek'><option value=''>全部</option></select>
   </label>
   <button class='btn btn-sm btn-outline' id='btnToday' onclick='toggleTodayFilter()'>📅 只看今天</button>
-  <button class='btn btn-sm btn-outline' onclick=""['filterYear','filterMonth','filterWeek'].forEach(id=>document.getElementById(id).value='');clearTodayFilter();logTable.run()"">清除日期篩選</button>
+  <button class='btn btn-sm btn-outline' onclick='clearAllLinkFilters()'>清除篩選</button>
 </div>
+{linkInfoHtml}
 <div class='table-wrap'>
 <table id='log-table'>
 <thead><tr>
@@ -246,7 +263,12 @@ function isoWeek(dateStr) {{
   fill('filterWeek', weeks, w => '第 ' + w + ' 週');
 }})();
 let filterExactDate = '{linkFilter.Date}';
-// 從網址帶入初始篩選（例如從 Dashboard 點擊「紀錄筆數」連結進入）
+// 從網址帶入初始篩選（例如從 Dashboard 點擊各項紀錄數連結進入）
+const BLANK_MARKER = '{BlankMarker}';
+let initEpicName = {JsonSerializer.Serialize(initEpicName)};
+let initSummary = {JsonSerializer.Serialize(initSummary)};
+let initModule = {JsonSerializer.Serialize(initModule)};
+let initIssuer = {JsonSerializer.Serialize(initIssuer)};
 if (filterExactDate) {{
   document.getElementById('btnToday').classList.remove('btn-outline');
   document.getElementById('btnToday').classList.add('btn-danger');
@@ -267,9 +289,26 @@ function clearTodayFilter() {{
   document.getElementById('btnToday').classList.add('btn-outline');
   document.getElementById('btnToday').classList.remove('btn-danger');
 }}
+function clearAllLinkFilters() {{
+  ['filterYear', 'filterMonth', 'filterWeek'].forEach(id => document.getElementById(id).value = '');
+  clearTodayFilter();
+  initEpicName = ''; initSummary = ''; initModule = ''; initIssuer = '';
+  const info = document.getElementById('link-filter-info');
+  if (info) info.remove();
+  logTable.run();
+}}
+function dimMatch(want, actual) {{
+  if (!want) return true;
+  return want === BLANK_MARKER ? !actual : actual === want;
+}}
 function dateExtraFilter(row) {{
   const log = fullLogsData[row.dataset.id];
-  if (!log || !log.planStartDate) return true;
+  if (!log) return true;
+  if (!dimMatch(initEpicName, log.epicName)) return false;
+  if (!dimMatch(initSummary, log.summary)) return false;
+  if (!dimMatch(initModule, log.module)) return false;
+  if (!dimMatch(initIssuer, log.requestIssuer)) return false;
+  if (!log.planStartDate) return true;
   if (filterExactDate) return log.planStartDate === filterExactDate;
   const d = new Date(log.planStartDate + 'T00:00:00');
   const fy = document.getElementById('filterYear').value;
@@ -299,7 +338,7 @@ const logTable = initTable('log-table', {{
     if (hr) hr.textContent = (sum / 60).toFixed(1) + ' 小時';
   }}
 }});
-if ('{linkFilter.Year}' || '{linkFilter.Month}' || '{linkFilter.Week}' || '{linkFilter.Date}') logTable.run();
+if ('{linkFilter.Year}' || '{linkFilter.Month}' || '{linkFilter.Week}' || '{linkFilter.Date}' || initEpicName || initSummary || initModule || initIssuer) logTable.run();
 </script>";
 
         ctx.Response.ContentType = "text/html; charset=utf-8";
@@ -320,6 +359,27 @@ if ('{linkFilter.Year}' || '{linkFilter.Month}' || '{linkFilter.Week}' || '{link
 
         var filter = ParseDateFilter(ctx);
         var logs = FilterByDate(allLogs, filter);
+
+        // 明細連結：帶入目前日期篩選 + 指定維度（epicName/summary/module/issuer）的精確篩選
+        string DimLink(string param, string value)
+        {
+            var parts = new List<string>();
+            if (!string.IsNullOrEmpty(filter.Year)) parts.Add("year=" + filter.Year);
+            if (!string.IsNullOrEmpty(filter.Month)) parts.Add("month=" + filter.Month);
+            if (!string.IsNullOrEmpty(filter.Week)) parts.Add("week=" + filter.Week);
+            if (!string.IsNullOrEmpty(filter.Date)) parts.Add("date=" + Uri.EscapeDataString(filter.Date));
+            parts.Add(param + "=" + Uri.EscapeDataString(value));
+            return "/work/log?" + string.Join("&", parts);
+        }
+
+        // 月份長條圖連結：改用該月份本身作為日期篩選（取代週/日篩選，避免衝突）
+        string MonthLink(string monthKey)
+        {
+            var parts = monthKey.Split('-');
+            return parts.Length == 2 && int.TryParse(parts[1], out var m)
+                ? $"/work/log?year={parts[0]}&month={m}"
+                : "/work/log";
+        }
 
         var dateParsed = allLogs.Select(l => (Log: l, Ok: DateTime.TryParse(l.PlanStartDate, out var d), Date: d)).Where(x => x.Ok).ToList();
         var yearOpts = dateParsed.Select(x => x.Date.Year).Distinct().OrderBy(y => y).ToList();
@@ -367,7 +427,7 @@ function goDashToday() {{
         var activeMonths = logs.Select(l => l.PlanStartDate.Length >= 7 ? l.PlanStartDate[..7] : l.PlanStartDate).Distinct().Count();
         var avgMinPerMonth = activeMonths == 0 ? 0 : totalMin / (double)activeMonths;
 
-        string BarRows(IEnumerable<(string Label, int Minutes, int Count)> items)
+        string BarRows(IEnumerable<(string Label, int Minutes, int Count)> items, Func<string, string> linkFor)
         {
             var list = items.OrderByDescending(i => i.Minutes).ToList();
             var max = list.Count == 0 ? 1 : list.Max(i => i.Minutes);
@@ -375,7 +435,7 @@ function goDashToday() {{
 <div class='bar-row'>
   <div class='bar-label'>{System.Net.WebUtility.HtmlEncode(i.Label)}</div>
   <div class='bar-track'><div class='bar-fill' style='width:{(max == 0 ? 0 : i.Minutes * 100.0 / max):F1}%'></div></div>
-  <div class='bar-value'>{i.Minutes:N0} 分（{i.Count} 筆，{(totalMin == 0 ? 0 : i.Minutes * 100.0 / totalMin):F0}%）</div>
+  <div class='bar-value'>{i.Minutes:N0} 分（<a href='{linkFor(i.Label)}' style='color:#0055cc;text-decoration:none'>{i.Count} 筆</a>，{(totalMin == 0 ? 0 : i.Minutes * 100.0 / totalMin):F0}%）</div>
 </div>"));
         }
 
@@ -422,7 +482,7 @@ function goDashToday() {{
   <td><span class='tag'>{System.Net.WebUtility.HtmlEncode(e.Module)}</span></td>
   <td>{System.Net.WebUtility.HtmlEncode(e.Summary)}</td>
   <td style='text-align:right;font-weight:600'>{e.Minutes:N0} 分</td>
-  <td style='text-align:right'>{e.Count} 筆</td>
+  <td style='text-align:right'><a href='{DimLink("epicName", e.EpicName)}' style='color:#0055cc;text-decoration:none'>{e.Count} 筆</a></td>
 </tr>"));
 
         // 效益亮點：挑選有填寫效益說明、且投入時間較多的項目，作為績效面談佐證
@@ -489,19 +549,19 @@ function goDashToday() {{
 </div>
 <div class='section'>
   <h2 style='margin-top:0'>近 12 個月貢獻趨勢</h2>
-  {BarRows(byMonth)}
+  {BarRows(byMonth, MonthLink)}
 </div>
 <div class='section'>
   <h2 style='margin-top:0'>貢獻類型分布（展現工作廣度）</h2>
-  {BarRows(bySummary)}
+  {BarRows(bySummary, l => DimLink("summary", l == "(未分類)" ? BlankMarker : l))}
 </div>
 <div class='section'>
   <h2 style='margin-top:0'>模組涵蓋分布（展現多元支援能力）</h2>
-  {BarRows(byModule)}
+  {BarRows(byModule, l => DimLink("module", l == "(未分類)" ? BlankMarker : l))}
 </div>
 <div class='section'>
   <h2 style='margin-top:0'>服務需求方統計</h2>
-  {BarRows(byIssuer)}
+  {BarRows(byIssuer, l => DimLink("issuer", l == "(未填寫)" ? BlankMarker : l))}
 </div>";
 
         ctx.Response.ContentType = "text/html; charset=utf-8";
@@ -616,9 +676,10 @@ function goDashToday() {{
   <label>建立資料夾</label>
   <div style='display:flex;gap:8px;align-items:center;flex-wrap:wrap'>
     <input id='folderBasePath' placeholder='指定路徑，例如 D:\WorkDocs 或 \\server\share' style='flex:1;min-width:220px'>
-    <button type='button' class='btn btn-sm btn-outline' onclick='createFolder()'>📁 建立資料夾</button>
+    <button type='button' class='btn btn-sm btn-outline' id='createFolderBtn' onclick='createFolder()'>📁 建立資料夾</button>
   </div>
   <div style='color:#999;font-size:.78rem;margin-top:4px'>會在上方路徑下建立「Requirement ID Request Issuer Description」子資料夾（瀏覽器會記住此路徑）。</div>
+  <div id='folderMsg' style='font-size:.85rem;margin-top:6px'></div>
 </div>
 
 <div class='actions' style='margin-top:8px'>
@@ -778,9 +839,14 @@ function showMsg(m,t){{document.getElementById('msg').innerHTML=`<div class='ale
 
 // ── 建立資料夾（路徑瀏覽器記住，資料夾名稱＝Requirement ID／Request Issuer／Description）──
 document.getElementById('folderBasePath').value = localStorage.getItem('workLogFolderBasePath') || '';
+function showFolderMsg(m, ok) {{
+  const el = document.getElementById('folderMsg');
+  el.textContent = m;
+  el.style.color = ok ? '#1e7e34' : '#c0392b';
+}}
 async function createFolder() {{
   const basePath = document.getElementById('folderBasePath').value.trim();
-  if (!basePath) {{ showMsg('請先輸入資料夾建立路徑', 'err'); return; }}
+  if (!basePath) {{ showFolderMsg('請先輸入資料夾建立路徑', false); return; }}
   localStorage.setItem('workLogFolderBasePath', basePath);
 
   const folderName = [
@@ -788,14 +854,29 @@ async function createFolder() {{
     document.getElementById('requestIssuer').value.trim(),
     document.getElementById('description').value.trim()
   ].filter(Boolean).join(' ');
-  if (!folderName) {{ showMsg('請至少填寫 Requirement ID、Request Issuer 或 Description 其中一項', 'err'); return; }}
+  if (!folderName) {{ showFolderMsg('請至少填寫 Requirement ID、Request Issuer 或 Description 其中一項', false); return; }}
 
-  const r = await fetch('/api/worklog/create-folder', {{
-    method: 'POST', headers: {{'Content-Type':'application/json'}},
-    body: JSON.stringify({{ basePath, folderName }})
-  }});
-  if (r.ok) showMsg('✓ 已建立資料夾：' + folderName, 'ok');
-  else {{ const t = await r.text(); showMsg(t || '建立資料夾失敗', 'err'); }}
+  const btn = document.getElementById('createFolderBtn');
+  const oldText = btn.textContent;
+  btn.disabled = true; btn.textContent = '建立中...';
+  showFolderMsg('', true);
+  try {{
+    const r = await fetch('/api/worklog/create-folder', {{
+      method: 'POST', headers: {{'Content-Type':'application/json'}},
+      body: JSON.stringify({{ basePath, folderName }})
+    }});
+    if (r.ok) {{
+      const data = await r.json();
+      showFolderMsg('✓ 已建立資料夾：' + data.path, true);
+    }} else {{
+      const t = await r.text();
+      showFolderMsg(t || ('建立資料夾失敗（HTTP ' + r.status + '）'), false);
+    }}
+  }} catch (err) {{
+    showFolderMsg('建立資料夾失敗：無法連線到伺服器（' + err.message + '）', false);
+  }} finally {{
+    btn.disabled = false; btn.textContent = oldText;
+  }}
 }}
 </script>";
     }
