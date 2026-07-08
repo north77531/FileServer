@@ -17,6 +17,16 @@ public static class WorkLogModule
     const string DefIssue = "CIPR-3816";
     const string DefItpm = "ERIC.CY.CHOU";
 
+    // DS4X Epic 專屬帶入值
+    const string Ds4xEpicName = "DS4X";
+    const string Ds4xLinkedIssue = "is child of";
+    const string Ds4xIssue = "CIPR-3169";
+    const string Ds4xRequestIssuer = "ZOE.HY.LEE";
+
+    // 客戶標籤 Epic 專屬帶入值
+    const string CustomerTagEpicName = "客戶標籤";
+    const string CustomerTagModule = "SD";
+
     static readonly string[] SummaryOptions =
         ["Change Requests", "Issue Solving", "Operation Tickets", "Training & Enablement"];
     static readonly string[] EpicCategoryOptions =
@@ -34,7 +44,59 @@ public static class WorkLogModule
         app.MapPost("/api/worklog", AddLog);
         app.MapPut("/api/worklog/{id}", UpdateLog);
         app.MapDelete("/api/worklog/{id}", DeleteLog);
-        app.MapGet("/api/worklog/issuers", GetIssuers);
+        app.MapGet("/api/worklog/options", GetFieldOptions);
+        app.MapPost("/api/worklog/create-folder", CreateFolder);
+    }
+
+    // ── 日期篩選（供工作紀錄／Dashboard 頁面互相連結使用）──────────────────────
+
+    // 只接受乾淨的數字/日期格式，避免查詢字串內容被直接嵌入頁面 <script> 造成注入
+    static (string Year, string Month, string Week, string Date) ParseDateFilter(HttpContext ctx)
+    {
+        var q = ctx.Request.Query;
+        string year = q["year"].ToString();
+        if (year.Length != 4 || !year.All(char.IsAsciiDigit)) year = "";
+
+        string month = q["month"].ToString();
+        month = int.TryParse(month, out var m) && m is >= 1 and <= 12 ? m.ToString() : "";
+
+        string week = q["week"].ToString();
+        week = int.TryParse(week, out var w) && w is >= 1 and <= 53 ? w.ToString() : "";
+
+        string date = q["date"].ToString();
+        if (!DateTime.TryParseExact(date, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None, out _)) date = "";
+
+        return (year, month, week, date);
+    }
+
+    static string BuildDateQuery((string Year, string Month, string Week, string Date) f)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrEmpty(f.Date)) parts.Add("date=" + Uri.EscapeDataString(f.Date));
+        else
+        {
+            if (!string.IsNullOrEmpty(f.Year)) parts.Add("year=" + f.Year);
+            if (!string.IsNullOrEmpty(f.Month)) parts.Add("month=" + f.Month);
+            if (!string.IsNullOrEmpty(f.Week)) parts.Add("week=" + f.Week);
+        }
+        return parts.Count == 0 ? "" : "?" + string.Join("&", parts);
+    }
+
+    static List<WorkLog> FilterByDate(List<WorkLog> logs, (string Year, string Month, string Week, string Date) f)
+    {
+        if (!string.IsNullOrEmpty(f.Date))
+            return logs.Where(l => l.PlanStartDate == f.Date).ToList();
+        if (string.IsNullOrEmpty(f.Year) && string.IsNullOrEmpty(f.Month) && string.IsNullOrEmpty(f.Week))
+            return logs;
+        return logs.Where(l =>
+        {
+            if (!DateTime.TryParse(l.PlanStartDate, out var d)) return false;
+            if (!string.IsNullOrEmpty(f.Year) && d.Year.ToString() != f.Year) return false;
+            if (!string.IsNullOrEmpty(f.Month) && d.Month.ToString() != f.Month) return false;
+            if (!string.IsNullOrEmpty(f.Week) && System.Globalization.ISOWeek.GetWeekOfYear(d).ToString() != f.Week) return false;
+            return true;
+        }).ToList();
     }
 
     // ── Pages ─────────────────────────────────────────────────────────────
@@ -43,6 +105,7 @@ public static class WorkLogModule
     {
         var logs = LoadLogs().OrderByDescending(l => l.PlanStartDate).ThenByDescending(l => l.CreatedAt).ToList();
         var totalMin = logs.Sum(l => l.Minutes);
+        var linkFilter = ParseDateFilter(ctx);
 
         var rows = logs.Count == 0
             ? "<tr><td colspan='9' style='text-align:center;padding:30px;color:#999'>尚無工作紀錄</td></tr>"
@@ -182,7 +245,16 @@ function isoWeek(dateStr) {{
   fill('filterMonth', months, m => m + ' 月');
   fill('filterWeek', weeks, w => '第 ' + w + ' 週');
 }})();
-let filterExactDate = '';
+let filterExactDate = '{linkFilter.Date}';
+// 從網址帶入初始篩選（例如從 Dashboard 點擊「紀錄筆數」連結進入）
+if (filterExactDate) {{
+  document.getElementById('btnToday').classList.remove('btn-outline');
+  document.getElementById('btnToday').classList.add('btn-danger');
+}} else {{
+  if ('{linkFilter.Year}') document.getElementById('filterYear').value = '{linkFilter.Year}';
+  if ('{linkFilter.Month}') document.getElementById('filterMonth').value = '{linkFilter.Month}';
+  if ('{linkFilter.Week}') document.getElementById('filterWeek').value = '{linkFilter.Week}';
+}}
 function todayStr() {{ return new Date().toLocaleDateString('sv-SE'); }} // yyyy-MM-dd（本地時區）
 function toggleTodayFilter() {{
   filterExactDate = filterExactDate ? '' : todayStr();
@@ -227,6 +299,7 @@ const logTable = initTable('log-table', {{
     if (hr) hr.textContent = (sum / 60).toFixed(1) + ' 小時';
   }}
 }});
+if ('{linkFilter.Year}' || '{linkFilter.Month}' || '{linkFilter.Week}' || '{linkFilter.Date}') logTable.run();
 </script>";
 
         ctx.Response.ContentType = "text/html; charset=utf-8";
@@ -235,15 +308,57 @@ const logTable = initTable('log-table', {{
 
     static async Task DashboardPage(HttpContext ctx)
     {
-        var logs = LoadLogs();
+        var allLogs = LoadLogs();
 
-        if (logs.Count == 0)
+        if (allLogs.Count == 0)
         {
             var emptyBody = "<h1>📊 工作紀錄 Dashboard</h1><div class='empty-state'><div class='icon'>📭</div><p>尚無工作紀錄</p></div>";
             ctx.Response.ContentType = "text/html; charset=utf-8";
             await ctx.Response.WriteAsync(SharedLayout.Page("Dashboard", "work", "dashboard", emptyBody));
             return;
         }
+
+        var filter = ParseDateFilter(ctx);
+        var logs = FilterByDate(allLogs, filter);
+
+        var dateParsed = allLogs.Select(l => (Log: l, Ok: DateTime.TryParse(l.PlanStartDate, out var d), Date: d)).Where(x => x.Ok).ToList();
+        var yearOpts = dateParsed.Select(x => x.Date.Year).Distinct().OrderBy(y => y).ToList();
+        var monthOpts = dateParsed.Select(x => x.Date.Month).Distinct().OrderBy(m => m).ToList();
+        var weekOpts = dateParsed.Select(x => System.Globalization.ISOWeek.GetWeekOfYear(x.Date)).Distinct().OrderBy(w => w).ToList();
+
+        string OptsHtml<T>(List<T> vals, string current, Func<T, string> label) => string.Join("", vals.Select(v =>
+            $"<option value='{v}'{(v!.ToString() == current ? " selected" : "")}>{label(v)}</option>"));
+
+        var todayStr = DateTime.Today.ToString("yyyy-MM-dd");
+        var filterBar = $@"
+<div class='actions' style='margin-bottom:16px;gap:8px'>
+  <label style='display:flex;align-items:center;gap:4px;font-size:.85rem;color:#666'>年
+    <select id='dashYear' onchange='applyDashFilter()'><option value=''>全部</option>{OptsHtml(yearOpts, filter.Year, y => y + " 年")}</select>
+  </label>
+  <label style='display:flex;align-items:center;gap:4px;font-size:.85rem;color:#666'>月
+    <select id='dashMonth' onchange='applyDashFilter()'><option value=''>全部</option>{OptsHtml(monthOpts, filter.Month, m => m + " 月")}</select>
+  </label>
+  <label style='display:flex;align-items:center;gap:4px;font-size:.85rem;color:#666'>週
+    <select id='dashWeek' onchange='applyDashFilter()'><option value=''>全部</option>{OptsHtml(weekOpts, filter.Week, w => "第 " + w + " 週")}</select>
+  </label>
+  <button class='btn btn-sm {(filter.Date == todayStr ? "btn-danger" : "btn-outline")}' onclick='goDashToday()'>📅 只看今天</button>
+  <a href='/work/dashboard' class='btn btn-sm btn-outline'>清除篩選</a>
+</div>
+<script>
+function applyDashFilter() {{
+  const y = document.getElementById('dashYear').value;
+  const m = document.getElementById('dashMonth').value;
+  const w = document.getElementById('dashWeek').value;
+  const params = [];
+  if (y) params.push('year=' + y);
+  if (m) params.push('month=' + m);
+  if (w) params.push('week=' + w);
+  location.href = '/work/dashboard' + (params.length ? '?' + params.join('&') : '');
+}}
+function goDashToday() {{
+  location.href = '/work/dashboard?date=' + new Date().toLocaleDateString('sv-SE');
+}}
+</script>";
 
         var totalMin = logs.Sum(l => l.Minutes);
         var epicCount = logs.Select(l => l.EpicName).Where(s => !string.IsNullOrWhiteSpace(s)).Distinct().Count();
@@ -333,12 +448,15 @@ const logTable = initTable('log-table', {{
   <div class='highlight-min'>投入 {h.Minutes:N0} 分（約 {h.Minutes / 60.0:F1} 小時）</div>
 </div>"));
 
+        var detailQuery = BuildDateQuery(filter);
         var body = $@"
 <div class='actions' style='margin-bottom:16px'>
   <h1 style='margin:0;flex:1'>📊 工作紀錄 Dashboard</h1>
-  <a href='/work/log' class='btn btn-outline btn-sm'>查看明細</a>
+  <a href='/work/log{detailQuery}' class='btn btn-outline btn-sm'>查看明細</a>
 </div>
+{filterBar}
 <div class='cards'>
+  <div class='card'><div class='lbl'>紀錄筆數</div><div class='val'><a href='/work/log{detailQuery}' style='color:#0055cc;text-decoration:none'>{logs.Count} 筆 →</a></div></div>
   <div class='card'><div class='lbl'>總投入工時</div><div class='val pos'>{totalMin / 60.0:F1} 小時</div></div>
   <div class='card'><div class='lbl'>完成項目數</div><div class='val'>{epicCount} 項</div></div>
   <div class='card'><div class='lbl'>涵蓋模組數</div><div class='val'>{moduleCount} 個</div></div>
@@ -456,7 +574,7 @@ const logTable = initTable('log-table', {{
 </div>
 
 <div class='row2'>
-  <div class='field'><label>Epic Name</label><input id='epicName' value='{V(epicName)}' placeholder='本次工作主題'></div>
+  <div class='field'><label>Epic Name</label><input id='epicName' list='epicNameList' value='{V(epicName)}' placeholder='本次工作主題，可選也可自行輸入'><datalist id='epicNameList'></datalist></div>
   <div class='field'><label>Epic Category</label><select id='epicCategory'>{Opts(EpicCategoryOptions, epicCatSel)}</select></div>
 </div>
 
@@ -468,7 +586,7 @@ const logTable = initTable('log-table', {{
 
 <div class='field'><label>Jira Issue 單號</label><input id='jiraIssue' value='{V(jiraIssue)}' placeholder='例如 CIPR-1234'></div>
 <div class='field'><label>Benefit Description</label><input id='benefitDescription' value='{V(benefit)}' placeholder='效益說明'></div>
-<div class='field'><label>Labels（SAP TCODE）</label><input id='labels' value='{V(labels)}' placeholder='如：ME21N、VA01'></div>
+<div class='field'><label>Labels（SAP TCODE）</label><input id='labels' list='labelsList' value='{V(labels)}' placeholder='如：ME21N、VA01，可選也可自行輸入'><datalist id='labelsList'></datalist></div>
 <div class='field'><label>Description</label><textarea id='description' rows='3' placeholder='工作內容描述'>{V(description)}</textarea></div>
 
 <div class='row3'>
@@ -494,6 +612,15 @@ const logTable = initTable('log-table', {{
   <div style='color:#999;font-size:.78rem;margin-top:4px'>按「開始計時」開始工作，「結束計時」後自動累加分鐘數；可多段累計，也可手動微調。</div>
 </div>
 
+<div class='field'>
+  <label>建立資料夾</label>
+  <div style='display:flex;gap:8px;align-items:center;flex-wrap:wrap'>
+    <input id='folderBasePath' placeholder='指定路徑，例如 D:\WorkDocs 或 \\server\share' style='flex:1;min-width:220px'>
+    <button type='button' class='btn btn-sm btn-outline' onclick='createFolder()'>📁 建立資料夾</button>
+  </div>
+  <div style='color:#999;font-size:.78rem;margin-top:4px'>會在上方路徑下建立「Requirement ID Request Issuer Description」子資料夾（瀏覽器會記住此路徑）。</div>
+</div>
+
 <div class='actions' style='margin-top:8px'>
   <button class='btn' onclick='submit()'>{submitLabel}</button>
   <a href='/work/log' class='btn btn-outline'>取消</a>
@@ -504,13 +631,45 @@ const logTable = initTable('log-table', {{
 if (!document.getElementById('planStartDate').value)
   document.getElementById('planStartDate').value = new Date().toISOString().slice(0,10);
 
-// Request Issuer 自動完成（帶出曾輸入過的紀錄，仍可自行輸入）
-fetch('/api/worklog/issuers').then(r => r.json()).then(list => {{
-  const dl = document.getElementById('issuerList');
+// Request Issuer / Epic Name / Labels 自動完成（帶出曾輸入過的紀錄，仍可自行輸入）
+function fillDatalist(id, list) {{
+  const dl = document.getElementById(id);
   for (const s of list) {{
     const opt = document.createElement('option');
     opt.value = s;
     dl.appendChild(opt);
+  }}
+}}
+fetch('/api/worklog/options').then(r => r.json()).then(opts => {{
+  fillDatalist('issuerList', opts.issuers);
+  fillDatalist('epicNameList', opts.epicNames);
+  fillDatalist('labelsList', opts.labels);
+}});
+
+// 自由輸入的新值，本次也加入下拉選單供重複選用
+function trackComboInput(inputId, datalistId) {{
+  const inp = document.getElementById(inputId), dl = document.getElementById(datalistId);
+  inp.addEventListener('change', function() {{
+    const v = this.value.trim();
+    if (v && !Array.from(dl.options).some(o => o.value === v)) {{
+      const opt = document.createElement('option');
+      opt.value = v;
+      dl.appendChild(opt);
+    }}
+  }});
+}}
+trackComboInput('epicName', 'epicNameList');
+trackComboInput('labels', 'labelsList');
+
+// Epic Name 特定值時，自動帶入相關欄位
+document.getElementById('epicName').addEventListener('change', function() {{
+  const v = this.value.trim();
+  if (v === '{V(Ds4xEpicName)}') {{
+    document.getElementById('linkedIssue').value = '{V(Ds4xLinkedIssue)}';
+    document.getElementById('issue').value = '{V(Ds4xIssue)}';
+    document.getElementById('requestIssuer').value = '{V(Ds4xRequestIssuer)}';
+  }} else if (v === '{V(CustomerTagEpicName)}') {{
+    document.getElementById('module').value = '{V(CustomerTagModule)}';
   }}
 }});
 
@@ -586,6 +745,8 @@ function resetTimer() {{
   document.getElementById('minutes').value = 0;
 }}
 
+{(edit ? "" : "toggleTimer(); // 新增紀錄時自動開始計時")}
+
 async function submit() {{
   if (timerStart !== null) toggleTimer(); // 送出前自動停止計時
   const req = {{
@@ -614,6 +775,28 @@ async function submit() {{
   else {{ const t = await r.text(); showMsg(t || '儲存失敗', 'err'); }}
 }}
 function showMsg(m,t){{document.getElementById('msg').innerHTML=`<div class='alert ${{t}}'>${{m}}</div>`;}}
+
+// ── 建立資料夾（路徑瀏覽器記住，資料夾名稱＝Requirement ID／Request Issuer／Description）──
+document.getElementById('folderBasePath').value = localStorage.getItem('workLogFolderBasePath') || '';
+async function createFolder() {{
+  const basePath = document.getElementById('folderBasePath').value.trim();
+  if (!basePath) {{ showMsg('請先輸入資料夾建立路徑', 'err'); return; }}
+  localStorage.setItem('workLogFolderBasePath', basePath);
+
+  const folderName = [
+    document.getElementById('requirementId').value.trim(),
+    document.getElementById('requestIssuer').value.trim(),
+    document.getElementById('description').value.trim()
+  ].filter(Boolean).join(' ');
+  if (!folderName) {{ showMsg('請至少填寫 Requirement ID、Request Issuer 或 Description 其中一項', 'err'); return; }}
+
+  const r = await fetch('/api/worklog/create-folder', {{
+    method: 'POST', headers: {{'Content-Type':'application/json'}},
+    body: JSON.stringify({{ basePath, folderName }})
+  }});
+  if (r.ok) showMsg('✓ 已建立資料夾：' + folderName, 'ok');
+  else {{ const t = await r.text(); showMsg(t || '建立資料夾失敗', 'err'); }}
+}}
 </script>";
     }
 
@@ -663,15 +846,51 @@ function showMsg(m,t){{document.getElementById('msg').innerHTML=`<div class='ale
         return Results.Ok();
     }
 
-    static IResult GetIssuers()
+    static IResult GetFieldOptions()
     {
-        var issuers = LoadLogs()
-            .Select(l => l.RequestIssuer)
+        var logs = LoadLogs();
+        List<string> Distinct(Func<WorkLog, string> sel) => logs
+            .Select(sel)
             .Where(s => !string.IsNullOrWhiteSpace(s))
             .Distinct()
             .OrderBy(s => s)
             .ToList();
-        return Results.Ok(issuers);
+
+        return Results.Ok(new
+        {
+            issuers = Distinct(l => l.RequestIssuer),
+            epicNames = Distinct(l => l.EpicName),
+            labels = Distinct(l => l.Labels)
+        });
+    }
+
+    static IResult CreateFolder(CreateFolderRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.BasePath))
+            return Results.BadRequest("請輸入資料夾建立路徑");
+        if (string.IsNullOrWhiteSpace(req.FolderName))
+            return Results.BadRequest("資料夾名稱不可為空（請至少填寫 Requirement ID、Request Issuer 或 Description 其中一項）");
+
+        // 過濾檔名不合法字元，並確認結果仍落在指定的基準路徑內，避免用 ".." 等方式逸出
+        var invalidChars = Path.GetInvalidFileNameChars();
+        var safeName = new string(req.FolderName.Where(c => !invalidChars.Contains(c)).ToArray()).Trim();
+        if (string.IsNullOrWhiteSpace(safeName))
+            return Results.BadRequest("資料夾名稱不合法");
+
+        try
+        {
+            var basePath = Path.GetFullPath(req.BasePath);
+            var target = Path.GetFullPath(Path.Combine(basePath, safeName));
+            if (!target.StartsWith(basePath + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                return Results.BadRequest("資料夾名稱不合法");
+
+            Directory.CreateDirectory(target);
+            return Results.Ok(new { path = target });
+        }
+        catch (Exception ex)
+        {
+            return Results.BadRequest("建立資料夾失敗：" + ex.Message);
+        }
     }
 
     static IResult DeleteLog(string id)
@@ -729,3 +948,5 @@ public record WorkLogRequest(
     string? JiraIssue,
     string? BenefitDescription, string? Labels, string? Description, string? LinkedIssue,
     string? Issue, string? Itpm, string? RequestIssuer, string? PlanStartDate, int Minutes);
+
+public record CreateFolderRequest(string BasePath, string FolderName);
