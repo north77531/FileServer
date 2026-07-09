@@ -5,7 +5,6 @@ using System.Text.Json.Serialization;
 public static class StocksModule
 {
     static readonly string DataDir = Environment.GetEnvironmentVariable("DATA_DIR") ?? Path.Combine(AppContext.BaseDirectory, "data");
-    static readonly string HoldingsFile = Path.Combine(DataDir, "holdings.json");
     static readonly string TradesFile = Path.Combine(DataDir, "trades.json");
     static readonly string DividendsCacheFile = Path.Combine(DataDir, "dividends_cache.json");
     static readonly string SnapshotsFile = Path.Combine(DataDir, "stock_snapshots.json");
@@ -42,11 +41,11 @@ public static class StocksModule
 
     static async Task TradePage(HttpContext ctx)
     {
-        var holdings = LoadHoldings();
-        var accountTypes = holdings.Select(h => h.Type).Distinct().Order().ToList();
-        var knownStocks = holdings.Select(h => new { h.Code, h.Name }).DistinctBy(x => x.Code).ToList();
+        var trades = LoadTrades();
+        var accountTypes = trades.Select(t => t.AccountType).Where(a => !string.IsNullOrWhiteSpace(a)).Distinct().Order().ToList();
+        var knownStocks = trades.Select(t => new { t.StockCode, t.StockName }).DistinctBy(x => x.StockCode).ToList();
         ctx.Response.ContentType = "text/html; charset=utf-8";
-        await ctx.Response.WriteAsync(BuildTradeHtml(accountTypes, knownStocks.Select(x => $"{x.Code} {x.Name}").ToList()));
+        await ctx.Response.WriteAsync(BuildTradeHtml(accountTypes, knownStocks.Select(x => $"{x.StockCode} {x.StockName}").ToList()));
     }
 
     static async Task HistoryPage(HttpContext ctx)
@@ -61,7 +60,7 @@ public static class StocksModule
         var trade = LoadTrades().FirstOrDefault(t => t.Id == id);
         ctx.Response.ContentType = "text/html; charset=utf-8";
         if (trade == null) { ctx.Response.StatusCode = 404; await ctx.Response.WriteAsync("交易紀錄不存在"); return; }
-        var accountTypes = LoadHoldings().Select(h => h.Type).Distinct().Order().ToList();
+        var accountTypes = LoadTrades().Select(t => t.AccountType).Where(a => !string.IsNullOrWhiteSpace(a)).Distinct().Order().ToList();
         await ctx.Response.WriteAsync(BuildTradeEditHtml(trade, accountTypes));
     }
 
@@ -216,7 +215,6 @@ public static class StocksModule
             return Results.BadRequest("請填寫完整交易資料");
 
         var date = string.IsNullOrEmpty(req.Date) ? DateTime.Today.ToString("yyyy-MM-dd") : req.Date;
-        var totalAmount = req.Price * req.Shares;
         var trade = BuildTrade(Guid.NewGuid().ToString("N")[..8], req.StockName, req.StockCode, date,
             req.Shares, req.Price, req.TradeType, req.OrderNo ?? "", req.AccountType ?? "");
 
@@ -236,40 +234,6 @@ public static class StocksModule
             trades.Add(trade);
             SaveTrades(trades);
             if (_enableExcel) AppendTradeToExcel(trade);
-
-            var holdings = LoadHoldings();
-            var existing = holdings.FirstOrDefault(h => h.Type == req.AccountType && h.Code == req.StockCode);
-
-            if (req.TradeType == "現買" || req.TradeType == "配股")
-            {
-                var addedZhang = (int)(req.Shares / 1000);
-                if (existing != null)
-                {
-                    var idx = holdings.IndexOf(existing);
-                    holdings[idx] = existing with { Shares = existing.Shares + addedZhang, Cost = existing.Cost + (long)totalAmount };
-                }
-                else
-                {
-                    holdings.Add(new Holding(req.AccountType, req.StockCode, req.StockName, addedZhang, (long)totalAmount));
-                }
-            }
-            else if (req.TradeType == "現賣" && existing != null)
-            {
-                var soldZhang = (int)(req.Shares / 1000);
-                var newShares = existing.Shares - soldZhang;
-                if (newShares <= 0)
-                    holdings.Remove(existing);
-                else
-                {
-                    var costPerZhang = existing.Cost / existing.Shares;
-                    holdings[holdings.IndexOf(existing)] = existing with
-                    {
-                        Shares = newShares,
-                        Cost = existing.Cost - costPerZhang * soldZhang
-                    };
-                }
-            }
-            SaveHoldings(holdings);
         }
         finally { Lock.Release(); }
 
@@ -385,43 +349,45 @@ public static class StocksModule
         }
     }
 
+    // 庫存改由交易紀錄即時推算（不再另外維護 holdings.json），確保庫存頁與交易紀錄一致
     static IResult GetHoldings()
     {
-        return Results.Json(LoadHoldings());
+        var holdings = AggregateHoldings(LoadTrades())
+            .Select(h => new Holding("", h.Code, h.Name, h.Shares, h.Cost))
+            .ToList();
+        return Results.Json(holdings);
     }
 
-    // 依交易紀錄回推指定日期當下、各檔股票的持有張數與成本（同 AddTrade 的庫存滾動邏輯，但以歷史日期為終點重算）
-    static List<(string Code, string Name, int Shares, long Cost)> ComputeHoldingsAsOf(string cutoffDate)
-    {
-        var trades = LoadTrades()
-            .Where(t => string.Compare(t.Date, cutoffDate, StringComparison.Ordinal) <= 0)
-            .OrderBy(t => t.Date) // 穩定排序：同一天交易維持原始建立順序
-            .ToList();
+    // 依交易紀錄回推指定日期當下、各檔股票的持有張數與成本
+    static List<(string Code, string Name, int Shares, long Cost)> ComputeHoldingsAsOf(string cutoffDate) =>
+        AggregateHoldings(LoadTrades().Where(t => string.Compare(t.Date, cutoffDate, StringComparison.Ordinal) <= 0));
 
-        var agg = new Dictionary<string, (string Name, int Shares, long Cost)>();
-        foreach (var t in trades)
+    // 股數以原始股數（而非張）累加，避免逐筆交易各自無條件捨去到「張」造成零股誤差累積消失
+    static List<(string Code, string Name, int Shares, long Cost)> AggregateHoldings(IEnumerable<Trade> trades)
+    {
+        var agg = new Dictionary<string, (string Name, long Shares, long Cost)>();
+        foreach (var t in trades.OrderBy(t => t.Date)) // 穩定排序：同一天交易維持原始建立順序
         {
             agg.TryGetValue(t.StockCode, out var cur);
             if (string.IsNullOrEmpty(cur.Name)) cur.Name = t.StockName;
 
             if (t.TradeType == "現買" || t.TradeType == "配股")
             {
-                cur.Shares += (int)(t.Shares / 1000);
+                cur.Shares += t.Shares;
                 cur.Cost += t.Cost;
             }
             else if (t.TradeType == "現賣" && cur.Shares > 0)
             {
-                var soldZhang = (int)(t.Shares / 1000);
-                var costPerZhang = cur.Cost / cur.Shares;
-                var newShares = cur.Shares - soldZhang;
-                cur.Cost = newShares <= 0 ? 0 : cur.Cost - costPerZhang * soldZhang;
+                var costPerShare = (decimal)cur.Cost / cur.Shares;
+                var newShares = cur.Shares - t.Shares;
+                cur.Cost = newShares <= 0 ? 0 : cur.Cost - (long)Math.Round(costPerShare * t.Shares);
                 cur.Shares = Math.Max(0, newShares);
             }
             agg[t.StockCode] = cur;
         }
 
         return agg.Where(kv => kv.Value.Shares > 0)
-            .Select(kv => (Code: kv.Key, kv.Value.Name, kv.Value.Shares, kv.Value.Cost))
+            .Select(kv => (Code: kv.Key, kv.Value.Name, Shares: (int)(kv.Value.Shares / 1000), kv.Value.Cost))
             .OrderBy(x => x.Code)
             .ToList();
     }
@@ -532,13 +498,6 @@ public static class StocksModule
 
     // ── Data helpers ──────────────────────────────────────────────────────
 
-    static List<Holding> LoadHoldings()
-    {
-        if (!File.Exists(HoldingsFile)) return [];
-        var json = File.ReadAllText(HoldingsFile);
-        return JsonSerializer.Deserialize<List<Holding>>(json, JsonOpts) ?? [];
-    }
-
     static List<Trade> LoadTrades()
     {
         if (!File.Exists(TradesFile)) return [];
@@ -555,9 +514,6 @@ public static class StocksModule
         if (changed) SaveTrades(trades);
         return trades;
     }
-
-    static void SaveHoldings(List<Holding> holdings) =>
-        File.WriteAllText(HoldingsFile, JsonSerializer.Serialize(holdings, JsonOpts));
 
     static void SaveTrades(List<Trade> trades) =>
         File.WriteAllText(TradesFile, JsonSerializer.Serialize(trades, JsonOpts));

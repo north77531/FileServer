@@ -5,7 +5,11 @@ public static class WorkLogModule
 {
     static readonly string DataDir = Environment.GetEnvironmentVariable("DATA_DIR") ?? Path.Combine(AppContext.BaseDirectory, "data");
     static readonly string LogsFile = Path.Combine(DataDir, "work_logs.json");
+    static readonly string FieldOptionsFile = Path.Combine(DataDir, "worklog_field_options.json");
     static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };
+
+    // 可自由輸入的下拉選單欄位（使用者可自行新增／刪除選項）
+    static readonly string[] ComboFieldKeys = ["epicNames", "labels", "issuers"];
 
     // ── 預設值與選項 ────────────────────────────────────────────────────────
     const string DefProject = "CyntecITR(ITCYTER)";
@@ -48,6 +52,7 @@ public static class WorkLogModule
         app.MapPut("/api/worklog/{id}", UpdateLog);
         app.MapDelete("/api/worklog/{id}", DeleteLog);
         app.MapGet("/api/worklog/options", GetFieldOptions);
+        app.MapDelete("/api/worklog/options", DeleteFieldOption);
         app.MapPost("/api/worklog/create-folder", CreateFolder);
     }
 
@@ -634,7 +639,12 @@ function goDashToday() {{
 </div>
 
 <div class='row2'>
-  <div class='field'><label>Epic Name</label><input id='epicName' list='epicNameList' value='{V(epicName)}' placeholder='本次工作主題，可選也可自行輸入'><datalist id='epicNameList'></datalist></div>
+  <div class='field'><label>Epic Name</label>
+    <div class='combo' id='epicNameCombo'>
+      <input id='epicName' autocomplete='off' value='{V(epicName)}' placeholder='本次工作主題，可選也可自行輸入'>
+      <div class='combo-panel' id='epicNamePanel'></div>
+    </div>
+  </div>
   <div class='field'><label>Epic Category</label><select id='epicCategory'>{Opts(EpicCategoryOptions, epicCatSel)}</select></div>
 </div>
 
@@ -646,7 +656,12 @@ function goDashToday() {{
 
 <div class='field'><label>Jira Issue 單號</label><input id='jiraIssue' value='{V(jiraIssue)}' placeholder='例如 CIPR-1234'></div>
 <div class='field'><label>Benefit Description</label><input id='benefitDescription' value='{V(benefit)}' placeholder='效益說明'></div>
-<div class='field'><label>Labels（SAP TCODE）</label><input id='labels' list='labelsList' value='{V(labels)}' placeholder='如：ME21N、VA01，可選也可自行輸入'><datalist id='labelsList'></datalist></div>
+<div class='field'><label>Labels（SAP TCODE）</label>
+  <div class='combo' id='labelsCombo'>
+    <input id='labels' autocomplete='off' value='{V(labels)}' placeholder='如：ME21N、VA01，可選也可自行輸入'>
+    <div class='combo-panel' id='labelsPanel'></div>
+  </div>
+</div>
 <div class='field'><label>Description</label><textarea id='description' rows='3' placeholder='工作內容描述'>{V(description)}</textarea></div>
 
 <div class='row3'>
@@ -656,7 +671,12 @@ function goDashToday() {{
 </div>
 
 <div class='row2'>
-  <div class='field'><label>Request Issuer</label><input id='requestIssuer' list='issuerList' value='{V(requestIssuer)}' placeholder='需求提出者'><datalist id='issuerList'></datalist></div>
+  <div class='field'><label>Request Issuer</label>
+    <div class='combo' id='requestIssuerCombo'>
+      <input id='requestIssuer' autocomplete='off' value='{V(requestIssuer)}' placeholder='需求提出者'>
+      <div class='combo-panel' id='requestIssuerPanel'></div>
+    </div>
+  </div>
   <div class='field'><label>Plan Start Date</label><input type='date' id='planStartDate' value='{V(planStart)}'></div>
 </div>
 
@@ -692,39 +712,72 @@ function goDashToday() {{
 if (!document.getElementById('planStartDate').value)
   document.getElementById('planStartDate').value = new Date().toISOString().slice(0,10);
 
-// Request Issuer / Epic Name / Labels 自動完成（帶出曾輸入過的紀錄，仍可自行輸入）
-function fillDatalist(id, list) {{
-  const dl = document.getElementById(id);
-  for (const s of list) {{
-    const opt = document.createElement('option');
-    opt.value = s;
-    dl.appendChild(opt);
-  }}
-}}
-fetch('/api/worklog/options').then(r => r.json()).then(opts => {{
-  fillDatalist('issuerList', opts.issuers);
-  fillDatalist('epicNameList', opts.epicNames);
-  fillDatalist('labelsList', opts.labels);
-}});
+// 自由輸入下拉選單（Epic Name／Labels／Request Issuer）：可自行輸入新值，也可從選單挑選或刪除既有選項
+function initCombo(inputId, panelId, deleteField) {{
+  const inp = document.getElementById(inputId), panel = document.getElementById(panelId);
+  let options = [];
 
-// 自由輸入的新值，本次也加入下拉選單供重複選用
-function trackComboInput(inputId, datalistId) {{
-  const inp = document.getElementById(inputId), dl = document.getElementById(datalistId);
-  inp.addEventListener('change', function() {{
-    const v = this.value.trim();
-    if (v && !Array.from(dl.options).some(o => o.value === v)) {{
-      const opt = document.createElement('option');
-      opt.value = v;
-      dl.appendChild(opt);
+  function render(filterText) {{
+    const q = (filterText || '').trim().toLowerCase();
+    const filtered = options.filter(o => !q || o.toLowerCase().indexOf(q) >= 0);
+    panel.innerHTML = '';
+    if (filtered.length === 0) {{ panel.classList.remove('open'); return; }}
+    for (const o of filtered) {{
+      const row = document.createElement('div');
+      row.className = 'combo-option';
+      const txt = document.createElement('span');
+      txt.className = 'combo-option-text';
+      txt.textContent = o;
+      txt.addEventListener('mousedown', e => {{
+        e.preventDefault();
+        inp.value = o;
+        inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
+        closePanel();
+      }});
+      row.appendChild(txt);
+      const del = document.createElement('span');
+      del.className = 'combo-option-del';
+      del.textContent = '✕';
+      del.title = '刪除此選項';
+      del.addEventListener('mousedown', async e => {{
+        e.preventDefault();
+        e.stopPropagation();
+        if (!confirm('確定刪除下拉選項「' + o + '」？（不會刪除已使用此值的既有紀錄）')) return;
+        try {{
+          const r = await fetch('/api/worklog/options?field=' + encodeURIComponent(deleteField) + '&value=' + encodeURIComponent(o), {{ method: 'DELETE' }});
+          if (r.ok) {{ options = options.filter(x => x !== o); render(inp.value); }}
+          else alert('刪除失敗');
+        }} catch (err) {{ alert('刪除失敗：' + err.message); }}
+      }});
+      row.appendChild(del);
+      panel.appendChild(row);
     }}
-  }});
+    panel.classList.add('open');
+  }}
+  function closePanel() {{ panel.classList.remove('open'); }}
+
+  inp.addEventListener('focus', () => render(inp.value));
+  inp.addEventListener('input', () => render(inp.value));
+  inp.addEventListener('blur', () => setTimeout(closePanel, 150));
+
+  return {{
+    setOptions(list) {{ options = list.slice(); }},
+    addOption(v) {{ if (v && options.indexOf(v) === -1) options.push(v); }}
+  }};
 }}
-trackComboInput('epicName', 'epicNameList');
-trackComboInput('labels', 'labelsList');
+const comboEpicName = initCombo('epicName', 'epicNamePanel', 'epicNames');
+const comboLabels = initCombo('labels', 'labelsPanel', 'labels');
+const comboRequestIssuer = initCombo('requestIssuer', 'requestIssuerPanel', 'issuers');
+fetch('/api/worklog/options').then(r => r.json()).then(opts => {{
+  comboEpicName.setOptions(opts.epicNames);
+  comboLabels.setOptions(opts.labels);
+  comboRequestIssuer.setOptions(opts.issuers);
+}});
 
 // Epic Name 特定值時，自動帶入相關欄位
 document.getElementById('epicName').addEventListener('change', function() {{
   const v = this.value.trim();
+  comboEpicName.addOption(v);
   if (v === '{V(Ds4xEpicName)}') {{
     document.getElementById('linkedIssue').value = '{V(Ds4xLinkedIssue)}';
     document.getElementById('issue').value = '{V(Ds4xIssue)}';
@@ -733,6 +786,8 @@ document.getElementById('epicName').addEventListener('change', function() {{
     document.getElementById('module').value = '{V(CustomerTagModule)}';
   }}
 }});
+document.getElementById('labels').addEventListener('change', function() {{ comboLabels.addOption(this.value.trim()); }});
+document.getElementById('requestIssuer').addEventListener('change', function() {{ comboRequestIssuer.addOption(this.value.trim()); }});
 
 // Summary 連動 Linked Issue / Issue / Issue Type / Epic Category
 document.getElementById('summary').addEventListener('change', function() {{
@@ -746,6 +801,11 @@ document.getElementById('summary').addEventListener('change', function() {{
     document.getElementById('issue').value = '';
     document.getElementById('issueType').value = 'Other';
     if (this.value === 'Issue Solving') document.getElementById('epicCategory').value = 'Issue';
+    else if (this.value === 'Operation Tickets') {{
+      const epicInput = document.getElementById('epicName');
+      epicInput.value = 'AUTH';
+      epicInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
+    }}
   }}
 }});
 
@@ -901,6 +961,7 @@ async function createFolder() {{
         var logs = LoadLogs();
         logs.Add(log);
         SaveLogs(logs);
+        TrackFieldOptions(req);
         return Results.Ok();
     }
 
@@ -924,25 +985,32 @@ async function createFolder() {{
             PlanStartDate = req.PlanStartDate ?? "", Minutes = req.Minutes
         };
         SaveLogs(logs);
+        TrackFieldOptions(req);
         return Results.Ok();
     }
 
     static IResult GetFieldOptions()
     {
-        var logs = LoadLogs();
-        List<string> Distinct(Func<WorkLog, string> sel) => logs
-            .Select(sel)
-            .Where(s => !string.IsNullOrWhiteSpace(s))
-            .Distinct()
-            .OrderBy(s => s)
-            .ToList();
-
+        var opts = LoadFieldOptions();
         return Results.Ok(new
         {
-            issuers = Distinct(l => l.RequestIssuer),
-            epicNames = Distinct(l => l.EpicName),
-            labels = Distinct(l => l.Labels)
+            issuers = opts["issuers"],
+            epicNames = opts["epicNames"],
+            labels = opts["labels"]
         });
+    }
+
+    static IResult DeleteFieldOption(HttpContext ctx)
+    {
+        string field = ctx.Request.Query["field"].ToString();
+        string value = ctx.Request.Query["value"].ToString();
+        if (!ComboFieldKeys.Contains(field)) return Results.BadRequest("不支援的欄位");
+        if (string.IsNullOrEmpty(value)) return Results.BadRequest("缺少選項值");
+
+        var opts = LoadFieldOptions();
+        opts[field].RemoveAll(v => v == value);
+        SaveFieldOptions(opts);
+        return Results.Ok();
     }
 
     static IResult CreateFolder(CreateFolderRequest req)
@@ -996,6 +1064,62 @@ async function createFolder() {{
     {
         Directory.CreateDirectory(DataDir);
         File.WriteAllText(LogsFile, JsonSerializer.Serialize(logs, JsonOpts));
+    }
+
+    // ── 自由輸入下拉選單選項（Epic Name／Labels／Request Issuer）──────────────
+    // 選項清單獨立存放，使用者可個別刪除選項而不影響既有紀錄的資料。
+
+    static Dictionary<string, List<string>> LoadFieldOptions()
+    {
+        Dictionary<string, List<string>>? opts = null;
+        if (File.Exists(FieldOptionsFile))
+            opts = JsonSerializer.Deserialize<Dictionary<string, List<string>>>(File.ReadAllText(FieldOptionsFile), JsonOpts);
+        opts ??= [];
+
+        // 首次啟用／欄位缺漏時，用既有紀錄的歷史值補齊初始選項
+        var logs = LoadLogs();
+        List<string> Distinct(Func<WorkLog, string> sel) => logs
+            .Select(sel).Where(s => !string.IsNullOrWhiteSpace(s)).Distinct().ToList();
+
+        var changed = false;
+        void Ensure(string key, Func<WorkLog, string> sel)
+        {
+            if (opts.ContainsKey(key)) return;
+            opts[key] = Distinct(sel);
+            changed = true;
+        }
+        Ensure("epicNames", l => l.EpicName);
+        Ensure("labels", l => l.Labels);
+        Ensure("issuers", l => l.RequestIssuer);
+
+        foreach (var key in ComboFieldKeys)
+            opts[key] = opts[key].OrderBy(s => s).ToList();
+
+        if (changed) SaveFieldOptions(opts);
+        return opts;
+    }
+
+    static void SaveFieldOptions(Dictionary<string, List<string>> opts)
+    {
+        Directory.CreateDirectory(DataDir);
+        File.WriteAllText(FieldOptionsFile, JsonSerializer.Serialize(opts, JsonOpts));
+    }
+
+    static void TrackFieldOptions(WorkLogRequest req)
+    {
+        var opts = LoadFieldOptions();
+        var changed = false;
+        void Add(string key, string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return;
+            if (opts[key].Contains(value)) return;
+            opts[key].Add(value);
+            changed = true;
+        }
+        Add("epicNames", req.EpicName);
+        Add("labels", req.Labels);
+        Add("issuers", req.RequestIssuer);
+        if (changed) SaveFieldOptions(opts);
     }
 }
 

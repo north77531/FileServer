@@ -113,6 +113,14 @@ input,select,textarea{width:100%;padding:9px 12px;border:1px solid #ddd;border-r
 input:focus,select:focus,textarea:focus{outline:none;border-color:#0055cc;box-shadow:0 0 0 2px rgba(0,85,204,.15)}
 .row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+.combo{position:relative}
+.combo-panel{display:none;position:absolute;top:100%;left:0;right:0;margin-top:2px;background:#fff;border:1px solid #ddd;border-radius:6px;max-height:220px;overflow-y:auto;box-shadow:0 4px 14px rgba(0,0,0,.14);z-index:50}
+.combo-panel.open{display:block}
+.combo-option{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 10px;font-size:.88rem;cursor:pointer}
+.combo-option:hover{background:#f0f4ff}
+.combo-option-text{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.combo-option-del{flex:none;color:#999;padding:1px 7px;border-radius:4px;font-size:.78rem}
+.combo-option-del:hover{background:#fde8e8;color:#c0392b}
 .btn{padding:10px 24px;background:#0055cc;color:#fff;border:none;border-radius:6px;font-size:.95rem;cursor:pointer;font-weight:500;text-decoration:none;display:inline-block;line-height:1.4}
 .btn:hover{background:#0044aa}
 .btn-sm{padding:5px 14px;font-size:.82rem}
