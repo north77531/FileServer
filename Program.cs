@@ -24,6 +24,7 @@ builder.Services.AddHttpClient();
 var app = builder.Build();
 
 StocksModule.MapRoutes(app);
+PledgeModule.MapRoutes(app);
 DebtModule.MapRoutes(app);
 HouseModule.MapRoutes(app);
 CarModule.MapRoutes(app);

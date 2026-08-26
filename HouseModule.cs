@@ -518,9 +518,9 @@ function showMsg(m,t){{document.getElementById('msg').innerHTML=`<div class='ale
 <thead><tr><th>日期</th><th>類別</th><th>品項</th><th>品牌</th><th style='text-align:right'>金額</th><th>店家／廠商</th><th>備註</th><th></th></tr></thead>
 <tbody>{rows}</tbody>
 <tfoot><tr>
-  <td colspan='4'>篩選合計</td>
+  <td>篩選合計</td><td></td><td></td><td></td>
   <td style='text-align:right;font-weight:600' id='hexp-tf-total'>{total:N0}</td>
-  <td colspan='3'></td>
+  <td></td><td></td><td></td>
 </tr></tfoot>
 </table>
 </div>
@@ -532,6 +532,7 @@ async function del(id) {{
   if (r.ok) location.reload();
   else document.getElementById('msg').innerHTML = '<div class=""alert err"">刪除失敗</div>';
 }}
+setupColumns('house-exp-table', 'house-exp', {{ labels: {{ 7: '操作' }} }});
 initTable('house-exp-table', {{
   cols: 8,
   noFilter: [4, 7],

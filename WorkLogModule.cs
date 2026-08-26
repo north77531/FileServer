@@ -34,6 +34,19 @@ public static class WorkLogModule
     // Dashboard → 工作紀錄明細 深連結時，代表「該欄位為空白」的保留值
     const string BlankMarker = "__BLANK__";
 
+    // Labels 為自由輸入欄位，可能一次填多個（如「ME21N、VA01」）
+    static readonly char[] LabelSeparators = ['、', ',', '，', ';', '；', '/'];
+    const string NoLabelMarker = "(未填 Label)";
+
+    static List<string> SplitLabels(string? raw)
+    {
+        var parts = (raw ?? "")
+            .Split(LabelSeparators, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Distinct()
+            .ToList();
+        return parts.Count == 0 ? [NoLabelMarker] : parts;
+    }
+
     static readonly string[] SummaryOptions =
         ["Change Requests", "Issue Solving", "Operation Tickets", "Training & Enablement"];
     static readonly string[] EpicCategoryOptions =
@@ -128,19 +141,32 @@ public static class WorkLogModule
         var linkInfoHtml = linkInfoParts.Count == 0 ? "" :
             $"<div id='link-filter-info' style='color:#0055cc;font-size:.82rem;margin:-4px 0 10px'>🔗 從 Dashboard 篩選：{System.Net.WebUtility.HtmlEncode(string.Join("、", linkInfoParts))}</div>";
 
+        string E(string? s) => System.Net.WebUtility.HtmlEncode(s ?? "");
         var rows = logs.Count == 0
-            ? "<tr><td colspan='9' style='text-align:center;padding:30px;color:#999'>尚無工作紀錄</td></tr>"
+            ? "<tr><td colspan='20' style='text-align:center;padding:30px;color:#999'>尚無工作紀錄</td></tr>"
             : string.Join("", logs.Select(l => $@"<tr data-id='{l.Id}'>
   <td>{l.PlanStartDate}</td>
-  <td>{System.Net.WebUtility.HtmlEncode(l.Summary)}</td>
-  <td>{System.Net.WebUtility.HtmlEncode(l.EpicName)}</td>
-  <td><span class='tag'>{System.Net.WebUtility.HtmlEncode(l.Module)}</span></td>
-  <td>{System.Net.WebUtility.HtmlEncode(l.RequirementId)}</td>
-  <td>{System.Net.WebUtility.HtmlEncode(l.JiraIssue)}</td>
-  <td>{System.Net.WebUtility.HtmlEncode(l.Labels)}</td>
+  <td>{E(l.Project)}</td>
+  <td>{E(l.IssueType)}</td>
+  <td>{E(l.Summary)}</td>
+  <td>{E(l.EpicName)}</td>
+  <td>{E(l.EpicCategory)}</td>
+  <td>{E(l.ItPlatform)}</td>
+  <td><span class='tag'>{E(l.Module)}</span></td>
+  <td>{E(l.RequirementId)}</td>
+  <td>{E(l.JiraIssue)}</td>
+  <td>{E(l.BenefitDescription)}</td>
+  <td>{E(l.Labels)}</td>
+  <td>{E(l.Description)}</td>
+  <td>{E(l.LinkedIssue)}</td>
+  <td>{E(l.Issue)}</td>
+  <td>{E(l.Itpm)}</td>
+  <td>{E(l.RequestIssuer)}</td>
   <td style='text-align:right;font-weight:600'>{l.Minutes:N0}</td>
+  <td>{E(l.CreatedAt)}</td>
   <td><div class='actions'>
     <a href='/work/log/{l.Id}/edit' class='btn btn-sm btn-outline'>編輯</a>
+    <a href='/work/log/add?copy={l.Id}' class='btn btn-sm btn-outline'>複製</a>
     <button class='btn btn-danger btn-sm' onclick='del(""{l.Id}"")'>刪除</button>
   </div></td>
 </tr>"));
@@ -177,13 +203,13 @@ public static class WorkLogModule
 <div class='table-wrap'>
 <table id='log-table'>
 <thead><tr>
-  <th>日期</th><th>Summary</th><th>Epic Name</th><th>Module</th><th>Requirement ID</th><th>Jira Issue</th><th>Labels</th><th style='text-align:right'>耗時(分)</th><th></th>
+  <th>日期</th><th>Project</th><th>Issue Type</th><th>Summary</th><th>Epic Name</th><th>Epic Category</th><th>IT Platform</th><th>Module</th><th>Requirement ID</th><th>Jira Issue</th><th>Benefit Description</th><th>Labels</th><th>Description</th><th>Linked Issue</th><th>Issue</th><th>ITPM</th><th>Request Issuer</th><th style='text-align:right'>耗時(分)</th><th>建立時間</th><th></th>
 </tr></thead>
 <tbody>{rows}</tbody>
 <tfoot><tr>
-  <td colspan='7'>篩選合計</td>
+  <td>篩選合計</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>
   <td style='text-align:right;font-weight:600' id='tf-min'>{totalMin:N0}</td>
-  <td></td>
+  <td></td><td></td>
 </tr></tfoot>
 </table>
 </div>
@@ -327,14 +353,19 @@ function dateExtraFilter(row) {{
 ['filterYear', 'filterMonth', 'filterWeek'].forEach(id =>
   document.getElementById(id).addEventListener('change', () => {{ clearTodayFilter(); logTable.run(); }}));
 
+// 全欄位皆可於『欄位設定』挑選；預設僅顯示常用欄位，其餘預設隱藏
+setupColumns('log-table', 'worklog-log', {{
+  labels: {{ 19: '操作' }},
+  defaultHidden: [1, 2, 5, 6, 10, 12, 13, 14, 15, 16, 18]
+}});
 const logTable = initTable('log-table', {{
-  cols: 9,
-  noFilter: [2, 7, 8],
-  sumCols: [{{col: 7, id: 'tf-min'}}],
+  cols: 20,
+  noFilter: [17, 19],
+  sumCols: [{{col: 17, id: 'tf-min'}}],
   extraFilter: dateExtraFilter,
   onFilter: function(vis) {{
     let sum = 0;
-    for (const r of vis) sum += parseFloat(r.cells[7].textContent.replace(/,/g,'')) || 0;
+    for (const r of vis) {{ const lg = fullLogsData[r.dataset.id]; sum += lg ? lg.minutes : 0; }}
     const countEl = document.getElementById('sum-count');
     if (countEl) countEl.textContent = vis.length.toLocaleString('zh-TW') + ' 筆';
     const el = document.getElementById('sum-min');
@@ -483,12 +514,30 @@ function goDashToday() {{
         var topEpicRows = string.Join("", topEpics.Select((e, i) => $@"
 <tr>
   <td style='text-align:center;color:#999'>{i + 1}</td>
-  <td>{System.Net.WebUtility.HtmlEncode(e.EpicName)}</td>
+  <td><button type='button' class='epic-pie-link' data-epic='{System.Net.WebUtility.HtmlEncode(e.EpicName)}'
+      onclick='showEpicPie(this.dataset.epic)' title='點擊查看各 Label 耗時圓餅圖'>{System.Net.WebUtility.HtmlEncode(e.EpicName)} 🥧</button></td>
   <td><span class='tag'>{System.Net.WebUtility.HtmlEncode(e.Module)}</span></td>
   <td>{System.Net.WebUtility.HtmlEncode(e.Summary)}</td>
-  <td style='text-align:right;font-weight:600'>{e.Minutes:N0} 分</td>
+  <td style='text-align:right;font-weight:600'>{e.Minutes:N0} 分<div class='cell-sub'>約 {e.Minutes / 60.0:F1} 小時</div></td>
   <td style='text-align:right'><a href='{DimLink("epicName", e.EpicName)}' style='color:#0055cc;text-decoration:none'>{e.Count} 筆</a></td>
 </tr>"));
+
+        var topEpicMin = topEpics.Sum(e => e.Minutes);
+
+        // 各 Epic 依 Label 的耗時分布（供點擊 Epic Name 顯示圓餅圖）
+        // 一筆紀錄若填了多個 Label，將其耗時平均分攤，使圓餅總和等於該 Epic 的總耗時
+        var epicLabelData = topEpics.ToDictionary(
+            e => e.EpicName,
+            e => logs.Where(l => l.EpicName == e.EpicName)
+                .SelectMany(l =>
+                {
+                    var parts = SplitLabels(l.Labels);
+                    return parts.Select(p => (Label: p, Minutes: l.Minutes / (double)parts.Count));
+                })
+                .GroupBy(x => x.Label)
+                .Select(g => new { label = g.Key, minutes = Math.Round(g.Sum(x => x.Minutes), 1) })
+                .OrderByDescending(x => x.minutes)
+                .ToList());
 
         // 效益亮點：挑選有填寫效益說明、且投入時間較多的項目，作為績效面談佐證
         var highlights = logs
@@ -538,6 +587,27 @@ function goDashToday() {{
 .highlight-title{{font-weight:600;margin-bottom:4px}}
 .highlight-benefit{{color:#444;font-size:.88rem;margin-bottom:4px;white-space:pre-wrap}}
 .highlight-min{{color:#888;font-size:.78rem}}
+.cell-sub{{color:#888;font-size:.75rem;font-weight:400;margin-top:2px}}
+.epic-pie-link{{background:none;border:none;padding:0;font:inherit;color:#0055cc;cursor:pointer;text-align:left}}
+.epic-pie-link:hover{{text-decoration:underline}}
+.pie-mask{{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:2000;display:flex;align-items:center;justify-content:center;padding:16px}}
+.pie-modal{{background:#fff;border-radius:10px;padding:20px;width:520px;max-width:100%;max-height:90vh;overflow:auto;box-shadow:0 10px 40px rgba(0,0,0,.25)}}
+.pie-head{{display:flex;align-items:flex-start;gap:10px;margin-bottom:4px}}
+.pie-title{{font-weight:600;flex:1;overflow-wrap:anywhere}}
+.pie-close{{background:none;border:none;font-size:1.3rem;color:#888;cursor:pointer;line-height:1;padding:0 4px}}
+.pie-close:hover{{color:#333}}
+.pie-sub{{color:#888;font-size:.8rem;margin-bottom:12px}}
+.pie-body{{display:flex;gap:18px;align-items:center;flex-wrap:wrap}}
+.pie-legend{{flex:1;min-width:210px;font-size:.85rem}}
+.pie-legend-row{{display:flex;align-items:center;gap:8px;padding:4px 2px;border-bottom:1px solid #f2f2f2}}
+.pie-legend-row:last-child{{border-bottom:none}}
+.pie-chip{{width:12px;height:12px;border-radius:3px;flex:none}}
+.pie-legend-name{{flex:1;min-width:0;overflow-wrap:anywhere;color:#333}}
+.pie-legend-val{{flex:none;color:#555;text-align:right;white-space:nowrap}}
+.pie-slice{{transition:opacity .12s}}
+.pie-slice:hover{{opacity:.75}}
+.contrib-pie-wrap{{display:flex;gap:20px;align-items:center;flex-wrap:wrap;margin:4px 0 18px}}
+.contrib-pie-wrap .pie-legend{{min-width:240px}}
 </style>
 <div class='section'>
   <h2 style='margin-top:0'>🌟 效益亮點（用於績效面談佐證）</h2>
@@ -545,10 +615,20 @@ function goDashToday() {{
 </div>
 <div class='section'>
   <h2 style='margin-top:0'>🏆 主要貢獻項目 Top 10（依投入工時排序）</h2>
+  <p style='color:#888;font-size:.8rem;margin:-8px 0 10px'>點擊 Epic Name 可查看該項目各 Label 的耗時圓餅圖</p>
+  <div class='contrib-pie-wrap'>
+    <svg id='contribPieSvg' viewBox='0 0 220 220' width='220' height='220' role='img' aria-label='主要貢獻項目耗時佔比圓餅圖'></svg>
+    <div class='pie-legend' id='contribPieLegend'></div>
+  </div>
   <div class='table-wrap'>
   <table>
   <thead><tr><th>#</th><th>Epic Name</th><th>Module</th><th>類型</th><th style='text-align:right'>耗時</th><th style='text-align:right'>紀錄數</th></tr></thead>
   <tbody>{topEpicRows}</tbody>
+  <tfoot><tr>
+    <td colspan='4' style='font-weight:600'>Top {topEpics.Count} 合計</td>
+    <td style='text-align:right;font-weight:600'>{topEpicMin:N0} 分<div class='cell-sub'>約 {topEpicMin / 60.0:F1} 小時</div></td>
+    <td style='text-align:right'>{topEpics.Sum(e => e.Count)} 筆</td>
+  </tr></tfoot>
   </table>
   </div>
 </div>
@@ -567,7 +647,131 @@ function goDashToday() {{
 <div class='section'>
   <h2 style='margin-top:0'>服務需求方統計</h2>
   {BarRows(byIssuer, l => DimLink("issuer", l == "(未填寫)" ? BlankMarker : l))}
-</div>";
+</div>
+<script>
+const epicLabelData = {JsonSerializer.Serialize(epicLabelData)};
+// 主要貢獻項目（Top）各 Epic 的耗時，供繪製整體佔比圓餅圖
+const contribData = {JsonSerializer.Serialize(topEpics.Select(e => new { label = e.EpicName, minutes = e.Minutes }))};
+// 固定順序的分類色（前 6 slot），第 7 項以後併為「其他」以維持可讀性
+const PIE_COLORS = ['#2a78d6', '#1baf7a', '#eda100', '#008300', '#4a3aa7', '#e34948'];
+const PIE_OTHER = '#9aa0a6';
+const MAX_SLICES = 6;
+
+function fmtMin(m) {{
+  const mm = Math.round(m * 10) / 10;
+  return mm.toLocaleString('zh-TW') + ' 分（約 ' + (m / 60).toFixed(1) + ' 小時）';
+}}
+
+function pieEsc(s) {{
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}}
+
+function buildSlices(items) {{
+  if (items.length <= MAX_SLICES) return items.map((it, i) => ({{ ...it, color: PIE_COLORS[i] }}));
+  const head = items.slice(0, MAX_SLICES - 1).map((it, i) => ({{ ...it, color: PIE_COLORS[i] }}));
+  const rest = items.slice(MAX_SLICES - 1);
+  head.push({{ label: '其他（' + rest.length + ' 項）', minutes: rest.reduce((s, x) => s + x.minutes, 0), color: PIE_OTHER }});
+  return head;
+}}
+
+function arcPath(cx, cy, r, ir, a0, a1) {{
+  const p = (ang, rad) => [cx + rad * Math.cos(ang), cy + rad * Math.sin(ang)];
+  const [x0, y0] = p(a0, r), [x1, y1] = p(a1, r);
+  const [ix1, iy1] = p(a1, ir), [ix0, iy0] = p(a0, ir);
+  const big = a1 - a0 > Math.PI ? 1 : 0;
+  return `M ${{x0}} ${{y0}} A ${{r}} ${{r}} 0 ${{big}} 1 ${{x1}} ${{y1}} L ${{ix1}} ${{iy1}} A ${{ir}} ${{ir}} 0 ${{big}} 0 ${{ix0}} ${{iy0}} Z`;
+}}
+
+function showEpicPie(epic) {{
+  const items = epicLabelData[epic] || [];
+  const total = items.reduce((s, x) => s + x.minutes, 0);
+  const slices = buildSlices(items);
+
+  const cx = 110, cy = 110, r = 100, ir = 56;
+  let svg = '';
+  if (slices.length === 1) {{
+    // 單一 Label：整圈同色，環形無法用 arc 畫滿圈
+    svg = `<circle cx='${{cx}}' cy='${{cy}}' r='${{(r + ir) / 2}}' fill='none' stroke='${{slices[0].color}}' stroke-width='${{r - ir}}'></circle>`;
+  }} else {{
+    let a = -Math.PI / 2;
+    for (const s of slices) {{
+      const sweep = total > 0 ? (s.minutes / total) * Math.PI * 2 : 0;
+      svg += `<path class='pie-slice' d='${{arcPath(cx, cy, r, ir, a, a + sweep)}}' fill='${{s.color}}' stroke='#fff' stroke-width='2'>`
+           + `<title>${{pieEsc(s.label)}}：${{fmtMin(s.minutes)}}</title></path>`;
+      a += sweep;
+    }}
+  }}
+  // 圓心放總時數，讓「這個 Epic 花了多久」不必靠讀圖推算
+  svg += `<text x='${{cx}}' y='${{cy - 4}}' text-anchor='middle' style='font-size:18px;font-weight:700;fill:#222'>${{(total / 60).toFixed(1)}}</text>`
+       + `<text x='${{cx}}' y='${{cy + 14}}' text-anchor='middle' style='font-size:11px;fill:#888'>小時</text>`;
+
+  const legend = slices.map(s => `<div class='pie-legend-row'>
+      <span class='pie-chip' style='background:${{s.color}}'></span>
+      <span class='pie-legend-name'>${{pieEsc(s.label)}}</span>
+      <span class='pie-legend-val'>${{fmtMin(s.minutes)}}<br>${{total > 0 ? (s.minutes / total * 100).toFixed(0) : 0}}%</span>
+    </div>`).join('');
+
+  const mask = document.createElement('div');
+  mask.className = 'pie-mask';
+  mask.innerHTML = `<div class='pie-modal'>
+    <div class='pie-head'>
+      <div class='pie-title'>🥧 ${{pieEsc(epic)}}</div>
+      <button type='button' class='pie-close' aria-label='關閉'>×</button>
+    </div>
+    <div class='pie-sub'>各 Label 耗時分布　合計 ${{fmtMin(total)}}</div>
+    <div class='pie-body'>
+      <svg viewBox='0 0 220 220' width='220' height='220' role='img' aria-label='各 Label 耗時圓餅圖'>${{svg}}</svg>
+      <div class='pie-legend'>${{legend}}</div>
+    </div>
+  </div>`;
+
+  const close = () => {{ mask.remove(); document.removeEventListener('keydown', onKey); }};
+  const onKey = e => {{ if (e.key === 'Escape') close(); }};
+  mask.addEventListener('click', e => {{ if (e.target === mask) close(); }});
+  mask.querySelector('.pie-close').addEventListener('click', close);
+  document.addEventListener('keydown', onKey);
+  document.body.appendChild(mask);
+}}
+
+// 整體「主要貢獻項目」耗時佔比圓餅圖（直接內嵌於區塊，非彈窗）
+function renderContribPie() {{
+  const svgEl = document.getElementById('contribPieSvg');
+  const legendEl = document.getElementById('contribPieLegend');
+  if (!svgEl || !legendEl) return;
+  const items = (contribData || []).filter(x => x.minutes > 0);
+  const total = items.reduce((s, x) => s + x.minutes, 0);
+  if (total <= 0) {{
+    svgEl.style.display = 'none';
+    legendEl.innerHTML = '<div style=\'color:#999;font-size:.85rem\'>尚無可統計的耗時</div>';
+    return;
+  }}
+  const slices = buildSlices(items);
+  const cx = 110, cy = 110, r = 100, ir = 56;
+  let svg = '';
+  if (slices.length === 1) {{
+    svg = `<circle cx='${{cx}}' cy='${{cy}}' r='${{(r + ir) / 2}}' fill='none' stroke='${{slices[0].color}}' stroke-width='${{r - ir}}'></circle>`;
+  }} else {{
+    let a = -Math.PI / 2;
+    for (const s of slices) {{
+      const sweep = (s.minutes / total) * Math.PI * 2;
+      svg += `<path class='pie-slice' d='${{arcPath(cx, cy, r, ir, a, a + sweep)}}' fill='${{s.color}}' stroke='#fff' stroke-width='2'>`
+           + `<title>${{pieEsc(s.label)}}：${{fmtMin(s.minutes)}}（${{(s.minutes / total * 100).toFixed(0)}}%）</title></path>`;
+      a += sweep;
+    }}
+  }}
+  svg += `<text x='${{cx}}' y='${{cy - 4}}' text-anchor='middle' style='font-size:18px;font-weight:700;fill:#222'>${{(total / 60).toFixed(1)}}</text>`
+       + `<text x='${{cx}}' y='${{cy + 14}}' text-anchor='middle' style='font-size:11px;fill:#888'>小時</text>`;
+  svgEl.innerHTML = svg;
+  legendEl.innerHTML = slices.map(s => `<div class='pie-legend-row'>
+      <span class='pie-chip' style='background:${{s.color}}'></span>
+      <span class='pie-legend-name'>${{pieEsc(s.label)}}</span>
+      <span class='pie-legend-val'>${{fmtMin(s.minutes)}}<br>${{(s.minutes / total * 100).toFixed(0)}}%</span>
+    </div>`).join('');
+}}
+renderContribPie();
+</script>";
 
         ctx.Response.ContentType = "text/html; charset=utf-8";
         await ctx.Response.WriteAsync(SharedLayout.Page("Dashboard", "work", "dashboard", body));
@@ -575,9 +779,14 @@ function goDashToday() {{
 
     static async Task AddLogPage(HttpContext ctx)
     {
-        var body = FormHtml(null);
+        // ?copy={id}：以既有紀錄為範本複製新增
+        var copyId = ctx.Request.Query["copy"].ToString();
+        WorkLog? src = string.IsNullOrEmpty(copyId) ? null : LoadLogs().FirstOrDefault(l => l.Id == copyId);
+        var copyMode = src != null;
+
+        var body = FormHtml(src, copyMode);
         ctx.Response.ContentType = "text/html; charset=utf-8";
-        await ctx.Response.WriteAsync(SharedLayout.Page("新增工作紀錄", "work", "logadd", body));
+        await ctx.Response.WriteAsync(SharedLayout.Page(copyMode ? "複製新增工作紀錄" : "新增工作紀錄", "work", "logadd", body));
     }
 
     static async Task EditLogPage(string id, HttpContext ctx)
@@ -592,34 +801,40 @@ function goDashToday() {{
 
     // ── Shared form (新增 / 編輯共用) ────────────────────────────────────────
 
-    static string FormHtml(WorkLog? log)
+    // 預設 Description 內容（新增時自動帶入）
+    const string DefDescription = "[ITCYTER]";
+
+    static string FormHtml(WorkLog? log, bool copyMode = false)
     {
-        bool edit = log != null;
+        // edit：真正的編輯既有紀錄；prefill：帶入既有紀錄資料（編輯或複製新增皆是）
+        bool edit = log != null && !copyMode;
+        bool prefill = log != null;
         string V(string? s) => System.Net.WebUtility.HtmlEncode(s ?? "");
 
         string Opts(string[] options, string selected) => string.Join("", options.Select(o =>
             $"<option value='{V(o)}'{(o == selected ? " selected" : "")}>{V(o)}</option>"));
 
-        var project = edit ? log!.Project : DefProject;
-        var issueType = edit ? log!.IssueType : DefIssueType;
-        var summarySel = edit ? log!.Summary : SummaryOptions[0];
-        var epicName = edit ? log!.EpicName : "";
-        var epicCatSel = edit ? log!.EpicCategory : DefEpicCategory;
-        var itPlatform = edit ? log!.ItPlatform : DefItPlatform;
-        var moduleSel = edit ? log!.Module : DefModule;
-        var requirementId = edit ? log!.RequirementId : "";
-        var jiraIssue = edit ? log!.JiraIssue : "";
-        var benefit = edit ? log!.BenefitDescription : "";
-        var labels = edit ? log!.Labels : "";
-        var description = edit ? log!.Description : "";
-        var linkedIssue = edit ? log!.LinkedIssue : DefLinkedIssue;
-        var issue = edit ? log!.Issue : DefIssue;
-        var itpm = edit ? log!.Itpm : DefItpm;
-        var requestIssuer = edit ? log!.RequestIssuer : "";
-        var planStart = edit ? log!.PlanStartDate : "";
+        var project = prefill ? log!.Project : DefProject;
+        var issueType = prefill ? log!.IssueType : DefIssueType;
+        var summarySel = prefill ? log!.Summary : SummaryOptions[0];
+        var epicName = prefill ? log!.EpicName : "";
+        var epicCatSel = prefill ? log!.EpicCategory : DefEpicCategory;
+        var itPlatform = prefill ? log!.ItPlatform : DefItPlatform;
+        var moduleSel = prefill ? log!.Module : DefModule;
+        var requirementId = prefill ? log!.RequirementId : "";
+        var jiraIssue = prefill ? log!.JiraIssue : "";
+        var benefit = prefill ? log!.BenefitDescription : "";
+        var labels = prefill ? log!.Labels : "";
+        var description = prefill ? log!.Description : DefDescription;
+        var linkedIssue = prefill ? log!.LinkedIssue : DefLinkedIssue;
+        var issue = prefill ? log!.Issue : DefIssue;
+        var itpm = prefill ? log!.Itpm : DefItpm;
+        var requestIssuer = prefill ? log!.RequestIssuer : "";
+        // 複製新增時：Plan Start Date 預設帶入今天、耗時歸零（視為新的工作），僅編輯沿用原值；一般新增則留白
+        var planStart = edit ? log!.PlanStartDate : (copyMode ? DateTime.Today.ToString("yyyy-MM-dd") : "");
         var minutes = edit ? log!.Minutes : 0;
 
-        var heading = edit ? "✏️ 編輯工作紀錄" : "📝 新增工作紀錄";
+        var heading = edit ? "✏️ 編輯工作紀錄" : (copyMode ? "📋 複製新增工作紀錄" : "📝 新增工作紀錄");
         var submitLabel = edit ? "儲存變更" : "確認新增";
         var apiUrl = edit ? $"/api/worklog/{log!.Id}" : "/api/worklog";
         var apiMethod = edit ? "PUT" : "POST";
@@ -708,9 +923,11 @@ function goDashToday() {{
 </div>
 </div>
 <script>
-// 預設日期為今天（僅新增時）
+{(edit ? "// 編輯時沿用該紀錄原本的 Plan Start Date" : @"
+// 新增（含複製）紀錄時，Plan Start Date 預設帶入今天日期；使用者仍可自行清除或修改
 if (!document.getElementById('planStartDate').value)
-  document.getElementById('planStartDate').value = new Date().toISOString().slice(0,10);
+  document.getElementById('planStartDate').value = new Date().toLocaleDateString('sv-SE');
+")}
 
 // 自由輸入下拉選單（Epic Name／Labels／Request Issuer）：可自行輸入新值，也可從選單挑選或刪除既有選項
 function initCombo(inputId, panelId, deleteField) {{
@@ -955,7 +1172,7 @@ async function createFolder() {{
             req.JiraIssue ?? "",
             req.BenefitDescription ?? "", req.Labels ?? "", req.Description ?? "", req.LinkedIssue ?? "",
             req.Issue ?? "", req.Itpm ?? "", req.RequestIssuer ?? "",
-            req.PlanStartDate ?? DateTime.Today.ToString("yyyy-MM-dd"), req.Minutes,
+            req.PlanStartDate ?? "", req.Minutes,
             DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
 
         var logs = LoadLogs();

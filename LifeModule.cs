@@ -8,23 +8,60 @@ public static class LifeModule
     // 小朋友照片資料夾（與個人網站同層），檔名為「名字.jpg」，可用環境變數覆蓋
     static readonly string PhotosDir = Environment.GetEnvironmentVariable("PHOTOS_DIR") ?? @"C:\Users\USER\OneDrive\文件\個人網站";
     static readonly string[] PhotoExts = [".jpg", ".jpeg", ".png"];
+    // 印章圖片資料夾，檔名為「印章key.png/svg…」，有圖就用圖、沒有就退回 emoji
+    static readonly string StampsDir = Environment.GetEnvironmentVariable("STAMPS_DIR") ?? Path.Combine(PhotosDir, "stamps");
+    static readonly string[] StampImgExts = [".svg", ".png", ".webp", ".jpg", ".jpeg", ".gif"];
     static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };
 
-    // 可選的蓋章圖案
-    static readonly Dictionary<string, string> Stamps = new()
+    // 可選的蓋章圖案（emoji、顯示名稱、分類）
+    static readonly Dictionary<string, StampDef> Stamps = new()
     {
-        ["dog"] = "🐶", ["cat"] = "🐱", ["rabbit"] = "🐰", ["bear"] = "🐻",
-        ["panda"] = "🐼", ["fox"] = "🦊", ["tiger"] = "🐯", ["lion"] = "🦁",
-        ["pig"] = "🐷", ["frog"] = "🐸", ["monkey"] = "🐵", ["chick"] = "🐥",
-        ["penguin"] = "🐧", ["koala"] = "🐨", ["hamster"] = "🐹", ["unicorn"] = "🦄",
+        // 動物
+        ["dog"] = new("🐶", "小狗", "動物"), ["cat"] = new("🐱", "小貓", "動物"),
+        ["rabbit"] = new("🐰", "兔子", "動物"), ["bear"] = new("🐻", "小熊", "動物"),
+        ["panda"] = new("🐼", "熊貓", "動物"), ["fox"] = new("🦊", "狐狸", "動物"),
+        ["tiger"] = new("🐯", "老虎", "動物"), ["lion"] = new("🦁", "獅子", "動物"),
+        ["pig"] = new("🐷", "小豬", "動物"), ["frog"] = new("🐸", "青蛙", "動物"),
+        ["monkey"] = new("🐵", "猴子", "動物"), ["chick"] = new("🐥", "小雞", "動物"),
+        ["penguin"] = new("🐧", "企鵝", "動物"), ["koala"] = new("🐨", "無尾熊", "動物"),
+        ["hamster"] = new("🐹", "倉鼠", "動物"), ["unicorn"] = new("🦄", "獨角獸", "動物"),
+        // 汪汪隊（以每位狗狗的招牌載具／主題代表）
+        ["chase"] = new("🚓", "阿奇", "汪汪隊"),    // 警犬
+        ["marshall"] = new("🚒", "毛毛", "汪汪隊"), // 消防犬
+        ["skye"] = new("🚁", "天天", "汪汪隊"),     // 飛行犬
+        ["rubble"] = new("🚜", "小力", "汪汪隊"),   // 工程犬
+        ["rocky"] = new("♻️", "灰灰", "汪汪隊"),    // 環保犬
+        ["zuma"] = new("🚤", "路馬", "汪汪隊"),     // 水上救援犬
+        ["everest"] = new("❄️", "珠珠", "汪汪隊"),  // 雪地救援犬
+        ["tracker"] = new("🌴", "阿樂", "汪汪隊"),  // 叢林追蹤犬
+        ["ryder"] = new("🛵", "萊德", "汪汪隊"),    // 隊長
     };
-    static string StampIcon(string key) => Stamps.TryGetValue(key, out var v) ? v : Stamps["dog"];
+    static string StampIcon(string key) => (Stamps.TryGetValue(key, out var v) ? v : Stamps["dog"]).Emoji;
+
+    // 找印章圖檔（stamps/{key}.svg…）；key 必須是已知印章，藉此擋目錄穿越
+    static string? StampImgPath(string key)
+    {
+        if (!Stamps.ContainsKey(key)) return null;
+        foreach (var ext in StampImgExts)
+        {
+            var p = Path.Combine(StampsDir, key + ext);
+            if (File.Exists(p)) return p;
+        }
+        return null;
+    }
+
+    // 印章的顯示內容：有圖用圖、沒圖退回 emoji。cls 用來套不同尺寸的樣式
+    static string StampVisual(string key, string cls) =>
+        StampImgPath(key) != null
+            ? $"<img class='{cls}' src='/life/stamp-img/{key}' alt=''>"
+            : StampIcon(key);
 
     public static void MapRoutes(WebApplication app)
     {
         app.MapGet("/life", CardsPage);
         app.MapGet("/life/card/add", AddCardPage);
         app.MapGet("/life/photo/{name}", PhotoFile);
+        app.MapGet("/life/stamp-img/{key}", StampImgFile);
 
         app.MapPost("/api/life/card", AddCard);
         app.MapPost("/api/life/card/{id}/stamp", Stamp);
@@ -48,6 +85,7 @@ public static class LifeModule
         string CardHtml(RewardCard c)
         {
             var icon = StampIcon(c.Stamp);
+            var slotVisual = StampVisual(c.Stamp, "stamp-img");
             var count = c.Entries.Count;
             var full = count >= c.Goal;
             var redeemed = !string.IsNullOrWhiteSpace(c.RedeemedAt);
@@ -57,7 +95,7 @@ public static class LifeModule
                 {
                     var e = c.Entries[i];
                     var tip = Enc(string.IsNullOrWhiteSpace(e.Reason) ? e.Date : $"{e.Date} · {e.Reason}");
-                    return $"<div class='slot filled' title='{tip}'>{icon}</div>";
+                    return $"<div class='slot filled' title='{tip}'>{slotVisual}</div>";
                 }
                 return $"<div class='slot'><span class='slot-no'>{i + 1}</span></div>";
             }));
@@ -145,6 +183,7 @@ public static class LifeModule
 .slot.filled{{cursor:help}}
 .slot-no{{color:#cfcfcf;font-size:.85rem;font-weight:600}}
 .slot.filled{{border:2px solid #ffcf66;background:#fff6dd;box-shadow:inset 0 0 0 2px #fff;animation:stampin .35s ease}}
+.slot .stamp-img{{width:88%;height:88%;object-fit:contain;border-radius:50%;display:block}}
 @keyframes stampin{{0%{{transform:scale(1.6) rotate(-12deg);opacity:0}}60%{{transform:scale(.9)}}100%{{transform:scale(1) rotate(0);opacity:1}}}}
 .reward{{font-size:.88rem;color:#7a6a3a;background:#fcf6e8;border-radius:8px;padding:6px 10px;margin-bottom:10px}}
 .stamp-log{{font-size:.82rem;color:#777;margin-bottom:12px}}
@@ -224,11 +263,25 @@ async function delCard(id) {{
 
     static async Task AddCardPage(HttpContext ctx)
     {
-        var stampChoices = string.Join("", Stamps.Select((kv, i) => $@"
+        var first = true;
+        var stampChoices = string.Join("", Stamps
+            .GroupBy(kv => kv.Value.Group)
+            .Select(g => $@"
+<div class='stamp-group-title'>{System.Net.WebUtility.HtmlEncode(g.Key)}</div>
+<div class='stamp-choices'>{string.Join("", g.Select(kv =>
+{
+    var chec2 = first ? " checked" : "";
+    first = false;
+    var vis = StampImgPath(kv.Key) != null
+        ? $"<img class='stamp-choice-img' src='/life/stamp-img/{kv.Key}' alt=''>"
+        : $"<span class='stamp-emoji'>{kv.Value.Emoji}</span>";
+    return $@"
 <label class='stamp-choice'>
-  <input type='radio' name='stamp' value='{kv.Key}'{(i == 0 ? " checked" : "")}>
-  <span class='stamp-emoji'>{kv.Value}</span>
-</label>"));
+  <input type='radio' name='stamp' value='{kv.Key}'{chec2}>
+  {vis}
+  <span class='stamp-name'>{System.Net.WebUtility.HtmlEncode(kv.Value.Label)}</span>
+</label>";
+}))}</div>"));
 
         var body = $@"
 <div>
@@ -236,11 +289,15 @@ async function delCard(id) {{
   <h1 style='margin:4px 0 20px'>⭐ 新增棒棒集點卡</h1>
 </div>
 <style>
+.stamp-group-title{{font-size:.82rem;font-weight:700;color:#b3700a;margin:14px 0 8px}}
+.stamp-group-title:first-of-type{{margin-top:4px}}
 .stamp-choices{{display:grid;grid-template-columns:repeat(auto-fill,minmax(64px,1fr));gap:10px}}
-.stamp-choice{{border:2px solid #e3e3e3;border-radius:12px;padding:10px;text-align:center;cursor:pointer;transition:all .15s;margin:0}}
+.stamp-choice{{border:2px solid #e3e3e3;border-radius:12px;padding:10px 6px;text-align:center;cursor:pointer;transition:all .15s;margin:0}}
 .stamp-choice:hover{{border-color:#ffcf66}}
 .stamp-choice input{{display:none}}
-.stamp-emoji{{font-size:2rem;display:block}}
+.stamp-emoji{{font-size:2rem;display:block;height:2.6rem;line-height:2.6rem}}
+.stamp-choice-img{{width:2.6rem;height:2.6rem;object-fit:contain;display:block;margin:0 auto}}
+.stamp-name{{font-size:.72rem;color:#7a6a3a;display:block;margin-top:2px}}
 .stamp-choice:has(input:checked){{border-color:#ff9f1c;background:#fff6dd;box-shadow:0 0 0 2px rgba(255,159,28,.2)}}
 </style>
 <div class='form-card' style='max-width:560px'>
@@ -248,7 +305,7 @@ async function delCard(id) {{
 <div class='field'><label>小朋友名字</label><input id='childName' placeholder='例如：小明'></div>
 <div class='field'>
   <label>選擇蓋章圖案</label>
-  <div class='stamp-choices'>{stampChoices}</div>
+  {stampChoices}
 </div>
 <div class='field'><label>集滿幾點</label><input type='number' id='goal' value='10' min='1' max='60'></div>
 <div class='field'><label>集滿獎勵（選填）</label><input id='reward' placeholder='例如：去吃冰淇淋'></div>
@@ -283,6 +340,21 @@ function showMsg(m, t) {{ document.getElementById('msg').innerHTML = `<div class
         var path = PhotoPath(name);
         if (path == null) return Results.NotFound();
         var ct = Path.GetExtension(path).ToLowerInvariant() == ".png" ? "image/png" : "image/jpeg";
+        return Results.File(path, ct);
+    }
+
+    static IResult StampImgFile(string key)
+    {
+        var path = StampImgPath(key);
+        if (path == null) return Results.NotFound();
+        var ct = Path.GetExtension(path).ToLowerInvariant() switch
+        {
+            ".svg" => "image/svg+xml",
+            ".png" => "image/png",
+            ".webp" => "image/webp",
+            ".gif" => "image/gif",
+            _ => "image/jpeg",
+        };
         return Results.File(path, ct);
     }
 
@@ -401,6 +473,9 @@ function showMsg(m, t) {{ document.getElementById('msg').innerHTML = `<div class
 }
 
 // ── Models ────────────────────────────────────────────────────────────────────
+
+// 蓋章圖案定義：emoji、顯示名稱、分類
+public record StampDef(string Emoji, string Label, string Group);
 
 public record StampEntry(
     [property: JsonPropertyName("date")] string Date,

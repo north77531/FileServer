@@ -70,6 +70,34 @@ public static class CarModule
                         priceDetailHtml += $"<div class='card'><div class='lbl'>頭款</div><div class='val'>{c.DownPayment:N0} 元</div></div>";
                 }
 
+                var warrantyHtml = "";
+                if (!string.IsNullOrEmpty(c.WarrantyUntil) && DateTime.TryParse(c.WarrantyUntil, out var wu))
+                {
+                    var daysLeft = (wu.Date - DateTime.Today).Days;
+                    var badge = daysLeft < 0
+                        ? "<span style='color:#c0392b;font-size:.78rem'>（已過保）</span>"
+                        : $"<span style='color:{(daysLeft <= 90 ? "#d80" : "#27ae60")};font-size:.78rem'>（剩 {daysLeft} 天）</span>";
+                    warrantyHtml = $"<div class='card'><div class='lbl'>保固截止</div><div class='val' style='font-size:1rem'>{c.WarrantyUntil} {badge}</div></div>";
+                }
+
+                var mileageHtml = c.Mileage > 0
+                    ? $"<div class='card'><div class='lbl'>里程數</div><div class='val' style='font-size:1rem'>{c.Mileage:N0} km</div></div>"
+                    : "";
+
+                var appraisalHtml = "";
+                if (c.AppraisalValue.HasValue && c.AppraisalValue > 0)
+                {
+                    var meta = "";
+                    if (DateTime.TryParse(c.AppraisalDate, out var ad))
+                    {
+                        var age = (DateTime.Today - ad.Date).Days;
+                        meta = age > 30
+                            ? $"<div style='font-size:.72rem;color:#d80'>{c.AppraisalDate} 更新 · 已 {age} 天，建議重查</div>"
+                            : $"<div style='font-size:.72rem;color:#888'>{c.AppraisalDate} 更新</div>";
+                    }
+                    appraisalHtml = $"<div class='card'><div class='lbl'>鑑價參考</div><div class='val' style='color:#2c6fbb'>{c.AppraisalValue.Value:N0} 元</div>{meta}</div>";
+                }
+
                 return $@"
 <div class='section'>
   <div class='actions' style='margin-bottom:12px'>
@@ -89,6 +117,9 @@ public static class CarModule
     <div class='card'><div class='lbl'>購入價格</div><div class='val'>{c.PurchasePrice:N0} 元</div></div>
     {priceDetailHtml}
     <div class='card'><div class='lbl'>購入日期</div><div class='val' style='font-size:1rem'>{c.PurchaseDate}</div></div>
+    {warrantyHtml}
+    {mileageHtml}
+    {appraisalHtml}
     <div class='card'><div class='lbl'>累計花費</div><div class='val pos'>{carExp:N0} 元</div></div>
     {profitHtml}
   </div>
@@ -101,6 +132,7 @@ public static class CarModule
         {
             var carExp = expenses.Where(e => e.CarId == c.Id).Sum(e => e.Amount);
             var isSold = c.SalePrice.HasValue && c.SalePrice > 0;
+            var apprExport = c.AppraisalValue.HasValue ? c.AppraisalValue.Value.ToString() : "";
             return $@"<tr>
   <td>{System.Net.WebUtility.HtmlEncode(c.Brand)}</td>
   <td>{System.Net.WebUtility.HtmlEncode(c.Model)}</td>
@@ -110,6 +142,9 @@ public static class CarModule
   <td>{System.Net.WebUtility.HtmlEncode(c.Owner)}</td>
   <td>{c.PurchasePrice}</td>
   <td>{c.PurchaseDate}</td>
+  <td>{c.WarrantyUntil}</td>
+  <td>{(c.Mileage > 0 ? c.Mileage.ToString() : "")}</td>
+  <td>{apprExport}</td>
   <td>{carExp}</td>
   <td>{(isSold ? c.SalePrice!.Value.ToString() : "")}</td>
   <td>{(isSold ? c.SaleDate : "")}</td>
@@ -130,7 +165,7 @@ public static class CarModule
 </div>" : "")}
 {cards}
 <table id='car-export-table' style='display:none'>
-<thead><tr><th>品牌</th><th>型號</th><th>車牌</th><th>出廠年份</th><th>顏色</th><th>車主</th><th>購入價格</th><th>購入日期</th><th>累計花費</th><th>賣出價格</th><th>賣出日期</th><th>備註</th></tr></thead>
+<thead><tr><th>品牌</th><th>型號</th><th>車牌</th><th>出廠年份</th><th>顏色</th><th>車主</th><th>購入價格</th><th>購入日期</th><th>保固截止</th><th>里程數</th><th>鑑價參考</th><th>累計花費</th><th>賣出價格</th><th>賣出日期</th><th>備註</th></tr></thead>
 <tbody>{exportRows}</tbody>
 </table>
 <div id='msg'></div>
@@ -207,6 +242,22 @@ async function delCar(id) {{
   </div>
 </div>
 <div class='field'>
+  <label>保固截止日</label>
+  <input type='date' id='warrantyUntil'>
+</div>
+<div style='margin:0 0 8px;font-weight:600;color:#555;font-size:.9rem'>賣車參考</div>
+<div class='row2'>
+  <div class='field'>
+    <label>里程數（公里）</label>
+    <input type='number' id='mileage' placeholder='如：35000'>
+  </div>
+  <div class='field'>
+    <label>鑑價金額（元）<small style='font-weight:400;color:#888'>　二手行情參考</small></label>
+    <input type='number' id='appraisalValue' placeholder='選填'>
+  </div>
+</div>
+<div style='font-size:.8rem;color:#888;margin:-8px 0 16px'>💡 可到 <a href='https://www.carp.com.tw/' target='_blank' rel='noopener'>CarP 汽車鑑價網</a> 輸入車型與里程查詢買賣行情後填入；此金額會存檔並記錄更新日期，超過一個月會提醒你更新。</div>
+<div class='field'>
   <label>備註</label>
   <textarea id='notes' rows='2' placeholder='選填'></textarea>
 </div>
@@ -235,6 +286,9 @@ async function submit() {
     downPayment: parseFloat(document.getElementById('downPayment').value) || 0,
     purchasePrice: parseFloat(document.getElementById('purchasePrice').value) || 0,
     purchaseDate: document.getElementById('purchaseDate').value,
+    warrantyUntil: document.getElementById('warrantyUntil').value,
+    mileage: parseInt(document.getElementById('mileage').value) || 0,
+    appraisalValue: document.getElementById('appraisalValue').value ? parseInt(document.getElementById('appraisalValue').value) : null,
     notes: document.getElementById('notes').value.trim()
   };
   if (!req.brand || !req.model || !req.plateNo) { showMsg('請填寫品牌、型號與車牌', 'err'); return; }
@@ -254,6 +308,9 @@ function showMsg(m,t){document.getElementById('msg').innerHTML=`<div class='aler
         var cars = LoadCars();
         var car = cars.FirstOrDefault(c => c.Id == id);
         if (car == null) { ctx.Response.StatusCode = 404; await ctx.Response.WriteAsync("車輛不存在"); return; }
+
+        var mileageVal = car.Mileage > 0 ? car.Mileage.ToString() : "";
+        var appraisalVal = car.AppraisalValue.HasValue ? car.AppraisalValue.Value.ToString() : "";
 
         var body = $@"
 <h1>🚗 編輯車輛</h1>
@@ -313,6 +370,22 @@ function showMsg(m,t){document.getElementById('msg').innerHTML=`<div class='aler
   </div>
 </div>
 <div class='field'>
+  <label>保固截止日</label>
+  <input type='date' id='warrantyUntil' value='{car.WarrantyUntil}'>
+</div>
+<div style='margin:0 0 8px;font-weight:600;color:#555;font-size:.9rem'>賣車參考</div>
+<div class='row2'>
+  <div class='field'>
+    <label>里程數（公里）</label>
+    <input type='number' id='mileage' value='{mileageVal}' placeholder='如：35000'>
+  </div>
+  <div class='field'>
+    <label>鑑價金額（元）<small style='font-weight:400;color:#888'>　二手行情參考</small></label>
+    <input type='number' id='appraisalValue' value='{appraisalVal}' placeholder='選填'>
+  </div>
+</div>
+<div style='font-size:.8rem;color:#888;margin:-8px 0 16px'>💡 可到 <a href='https://www.carp.com.tw/' target='_blank' rel='noopener'>CarP 汽車鑑價網</a> 查詢買賣行情後填入；金額有異動才會更新「資料日期」，超過一個月會提醒更新。</div>
+<div class='field'>
   <label>備註</label>
   <textarea id='notes' rows='2'>{System.Net.WebUtility.HtmlEncode(car.Notes)}</textarea>
 </div>
@@ -340,6 +413,9 @@ async function submit() {{
     downPayment: parseFloat(document.getElementById('downPayment').value) || 0,
     purchasePrice: parseFloat(document.getElementById('purchasePrice').value) || 0,
     purchaseDate: document.getElementById('purchaseDate').value,
+    warrantyUntil: document.getElementById('warrantyUntil').value,
+    mileage: parseInt(document.getElementById('mileage').value) || 0,
+    appraisalValue: document.getElementById('appraisalValue').value ? parseInt(document.getElementById('appraisalValue').value) : null,
     notes: document.getElementById('notes').value.trim()
   }};
   if (!req.brand || !req.model || !req.plateNo) {{ showMsg('請填寫品牌、型號與車牌', 'err'); return; }}
@@ -363,6 +439,9 @@ function showMsg(m,t){{document.getElementById('msg').innerHTML=`<div class='ale
         var expenses = LoadExpenses().Where(e => e.CarId == id).Sum(e => e.Amount);
         var totalCost = car.PurchasePrice + expenses;
         var isSold = car.SalePrice.HasValue && car.SalePrice > 0;
+        var apprCard = car.AppraisalValue.HasValue && car.AppraisalValue > 0
+            ? $"<div class='card'><div class='lbl'>鑑價參考{(string.IsNullOrEmpty(car.AppraisalDate) ? "" : $" <small style='color:#888;font-weight:400'>{car.AppraisalDate}</small>")}</div><div class='val' style='color:#2c6fbb'>{car.AppraisalValue.Value:N0} 元</div></div>"
+            : "";
 
         var existingSalePrice = car.SalePrice.HasValue ? car.SalePrice.Value.ToString() : "";
         var existingSaleDate = car.SaleDate ?? "";
@@ -382,6 +461,7 @@ function showMsg(m,t){{document.getElementById('msg').innerHTML=`<div class='ale
   <div class='card'><div class='lbl'>購入價格</div><div class='val'>{car.PurchasePrice:N0} 元</div></div>
   <div class='card'><div class='lbl'>累計花費</div><div class='val pos'>{expenses:N0} 元</div></div>
   <div class='card'><div class='lbl'>持有總成本</div><div class='val' style='font-weight:700'>{totalCost:N0} 元</div></div>
+  {apprCard}
 </div>
 <div class='form-card'>
 <div id='msg'></div>
@@ -502,9 +582,9 @@ function showMsg(m,t){{document.getElementById('msg').innerHTML=`<div class='ale
 </tr></thead>
 <tbody>{rows}</tbody>
 <tfoot><tr>
-  <td colspan='3'>篩選合計</td>
+  <td>篩選合計</td><td></td><td></td>
   <td style='text-align:right;font-weight:600' id='exp-tf-total'>{filtered.Sum(e => e.Amount):N0}</td>
-  <td colspan='3'></td>
+  <td></td><td></td><td></td>
 </tr></tfoot>
 </table>
 </div>
@@ -516,13 +596,14 @@ async function del(id) {{
   if (r.ok) location.reload();
   else document.getElementById('msg').innerHTML = '<div class=""alert err"">刪除失敗</div>';
 }}
+setupColumns('exp-table', 'car-exp', {{ labels: {{ 6: '操作' }} }});
 initTable('exp-table', {{
   cols: 7,
   noFilter: [3, 6],
   sumCols: [{{col: 3, id: 'exp-tf-total'}}],
   onFilter: function(vis) {{
     let sum = 0;
-    for (const r of vis) sum += parseFloat(r.cells[3].textContent.replace(/,/g,'')) || 0;
+    for (const r of vis) {{ const c = cellByCi(r, 3); sum += parseFloat((c ? c.textContent : '').replace(/,/g,'')) || 0; }}
     const el = document.getElementById('exp-filtered');
     if (el) el.textContent = Math.round(sum).toLocaleString('zh-TW') + ' 元';
   }}
@@ -628,7 +709,11 @@ function showMsg(m,t){{document.getElementById('msg').innerHTML=`<div class='ale
             Guid.NewGuid().ToString("N")[..8],
             req.Brand, req.Model, req.PlateNo, req.Year,
             req.Color ?? "", req.Owner ?? "", req.ListPrice, req.Discount, req.DownPayment,
-            req.PurchasePrice, req.PurchaseDate ?? "", req.Notes ?? "");
+            req.PurchasePrice, req.PurchaseDate ?? "", req.Notes ?? "", req.WarrantyUntil ?? "",
+            req.Mileage,
+            req.AppraisalValue,
+            req.AppraisalValue.HasValue ? DateTime.Today.ToString("yyyy-MM-dd") : "",
+            req.AppraisalValue.HasValue ? "手動" : "");
 
         var cars = LoadCars();
         cars.Add(car);
@@ -645,12 +730,28 @@ function showMsg(m,t){{document.getElementById('msg').innerHTML=`<div class='ale
         var idx = cars.FindIndex(c => c.Id == id);
         if (idx < 0) return Results.NotFound("車輛不存在");
 
-        cars[idx] = cars[idx] with
+        var existing = cars[idx];
+        // 鑑價：金額有異動才更新資料日期與來源（維持「最後更新時間」語意，供逾月提醒）
+        var apprDate = existing.AppraisalDate;
+        var apprSource = existing.AppraisalSource;
+        if (!req.AppraisalValue.HasValue)
+        {
+            apprDate = ""; apprSource = "";
+        }
+        else if (req.AppraisalValue != existing.AppraisalValue || string.IsNullOrEmpty(existing.AppraisalDate))
+        {
+            apprDate = DateTime.Today.ToString("yyyy-MM-dd");
+            apprSource = "手動";
+        }
+
+        cars[idx] = existing with
         {
             Brand = req.Brand, Model = req.Model, PlateNo = req.PlateNo, Year = req.Year,
             Color = req.Color ?? "", Owner = req.Owner ?? "", ListPrice = req.ListPrice, Discount = req.Discount,
             DownPayment = req.DownPayment, PurchasePrice = req.PurchasePrice, PurchaseDate = req.PurchaseDate ?? "",
-            Notes = req.Notes ?? ""
+            Notes = req.Notes ?? "", WarrantyUntil = req.WarrantyUntil ?? "",
+            Mileage = req.Mileage, AppraisalValue = req.AppraisalValue,
+            AppraisalDate = apprDate, AppraisalSource = apprSource
         };
         SaveCars(cars);
 
@@ -772,6 +873,11 @@ public record Car(
     [property: JsonPropertyName("purchasePrice")] long PurchasePrice,
     [property: JsonPropertyName("purchaseDate")] string PurchaseDate,
     [property: JsonPropertyName("notes")] string Notes,
+    [property: JsonPropertyName("warrantyUntil")] string WarrantyUntil = "",
+    [property: JsonPropertyName("mileage")] long Mileage = 0,
+    [property: JsonPropertyName("appraisalValue")] long? AppraisalValue = null,
+    [property: JsonPropertyName("appraisalDate")] string AppraisalDate = "",
+    [property: JsonPropertyName("appraisalSource")] string AppraisalSource = "",
     [property: JsonPropertyName("salePrice")] long? SalePrice = null,
     [property: JsonPropertyName("saleDate")] string SaleDate = "",
     [property: JsonPropertyName("saleNotes")] string SaleNotes = "");
@@ -789,7 +895,8 @@ public record CarExpense(
 public record CarRequest(
     string Brand, string Model, string PlateNo, int Year,
     string? Color, string? Owner, long ListPrice, long Discount, long DownPayment,
-    long PurchasePrice, string? PurchaseDate, string? Notes);
+    long PurchasePrice, string? PurchaseDate, string? Notes, string? WarrantyUntil = null,
+    long Mileage = 0, long? AppraisalValue = null);
 
 public record CarExpenseRequest(
     string CarId, string? Category, string? Date, long Amount, string? Vendor, string? Notes);

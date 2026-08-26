@@ -18,6 +18,10 @@ public static class SharedLayout
             ("/stocks/history",   "交易紀錄", "history"),
             ("/stocks/dividends", "歷史配息", "dividends"),
             ("/stocks/snapshots", "市值快照", "snapshots"),
+            ("/stocks/backtest",  "勝率回測", "backtest"),
+            ("/stocks/batch",     "批量回測", "batch"),
+            ("/stocks/watchlist", "關注訊號", "watchlist"),
+            ("/stocks/pledge",    "質借",   "pledge"),
         ],
         ["debt"] = [
             ("/debt",     "貸款列表", "list"),
@@ -93,7 +97,7 @@ thead th{position:sticky;top:0;z-index:2;background:#f0f4ff}
 .filter-btn.active{border-color:#0055cc;background:#eaf1ff;color:#0055cc;font-weight:600}
 .filter-btn-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .filter-btn-arrow{flex:none;font-size:.7rem;color:#889}
-.filter-panel{position:fixed;z-index:1000;background:#fff;border:1px solid #ccc;border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.18);padding:8px;width:220px;max-height:360px;display:flex;flex-direction:column;font-size:.85rem}
+.filter-panel{position:fixed;z-index:1000;background:#fff;border:1px solid #ccc;border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.18);padding:8px;width:300px;max-width:calc(100vw - 16px);max-height:min(460px,70vh);display:flex;flex-direction:column;font-size:.85rem}
 .filter-panel-search{padding:6px 8px;border:1px solid #ddd;border-radius:5px;font-size:.85rem;margin-bottom:6px;width:100%}
 .filter-panel-actions{display:flex;justify-content:space-between;align-items:center;font-size:.8rem;color:#555;margin-bottom:4px;padding-bottom:6px;border-bottom:1px solid #eee}
 .filter-panel-actions label{display:flex;align-items:center;gap:4px;cursor:pointer;font-weight:600;margin-bottom:0}
@@ -101,9 +105,14 @@ thead th{position:sticky;top:0;z-index:2;background:#f0f4ff}
 .filter-panel-actions a:hover{text-decoration:underline}
 .filter-panel-quick{color:#0055cc;text-decoration:none;font-size:.78rem;margin-bottom:6px;display:inline-block;cursor:pointer}
 .filter-panel-quick:hover{text-decoration:underline}
-.filter-panel-list{overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:1px;margin-bottom:8px}
-.filter-panel-list label{display:flex;align-items:center;gap:6px;padding:3px 4px;border-radius:4px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:400;margin-bottom:0;color:#333}
+.filter-panel-list{overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:2px;margin-bottom:8px;min-height:60px}
+.filter-panel-list label{display:flex;align-items:flex-start;gap:8px;padding:6px 8px;border-radius:4px;cursor:pointer;font-weight:400;margin-bottom:0;color:#333;line-height:1.35;border-bottom:1px solid #f2f2f2}
+.filter-panel-list label:last-child{border-bottom:none}
 .filter-panel-list label:hover{background:#f0f4ff}
+.filter-panel-list label input[type=checkbox]{margin-top:2px}
+.filter-panel-list .filter-opt-text{flex:1;min-width:0;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.filter-panel-count{font-size:.75rem;color:#888;margin-bottom:4px}
+.filter-panel-empty{font-size:.8rem;color:#999;text-align:center;padding:14px 4px}
 .filter-panel input[type=checkbox]{width:auto;flex:none}
 .filter-panel-buttons{display:flex;gap:6px;justify-content:flex-end}
 .form-card{background:#fff;border-radius:8px;padding:24px;box-shadow:0 1px 4px rgba(0,0,0,.08);max-width:600px}
@@ -143,6 +152,23 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:#0055cc;box-sh
 .calc-box{background:#f5f8ff;border:1px solid #dce6ff;border-radius:6px;padding:12px 14px;font-size:.88rem;margin-bottom:16px}
 .calc-box div{display:flex;justify-content:space-between;padding:2px 0}
 .calc-box .total{font-weight:600;border-top:1px solid #c0d0f0;margin-top:6px;padding-top:6px}
+.col-cfg-bar{display:flex;justify-content:flex-end;margin:0 0 6px}
+.col-cfg-mask{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:2000;display:flex;align-items:center;justify-content:center;padding:16px}
+.col-cfg-modal{background:#fff;border-radius:10px;padding:20px;width:360px;max-width:100%;max-height:90vh;overflow:auto;box-shadow:0 10px 40px rgba(0,0,0,.25)}
+.col-cfg-head{display:flex;align-items:flex-start;gap:10px;margin-bottom:4px}
+.col-cfg-title{font-weight:600;flex:1}
+.col-cfg-close{background:none;border:none;font-size:1.3rem;color:#888;cursor:pointer;line-height:1;padding:0 4px}
+.col-cfg-close:hover{color:#333}
+.col-cfg-sub{color:#888;font-size:.8rem;margin-bottom:12px}
+.col-cfg-list{display:flex;flex-direction:column;gap:4px;margin-bottom:14px}
+.col-cfg-item{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid #e3e8f0;border-radius:6px;background:#fafcff;cursor:grab;font-size:.9rem}
+.col-cfg-item.dragging{opacity:.5;border-color:#0055cc;background:#eaf1ff}
+.col-cfg-handle{color:#aab;font-size:1rem;flex:none}
+.col-cfg-item input[type=checkbox]{width:auto;flex:none;margin:0}
+.col-cfg-label{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.col-cfg-actions{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.col-cfg-reset{color:#0055cc;text-decoration:none;font-size:.82rem}
+.col-cfg-reset:hover{text-decoration:underline}
 ";
 
     public static string TableJs => @"
@@ -151,13 +177,24 @@ function initTable(id, opts) {
   const t = document.getElementById(id);
   if (!t) return;
   const tb = t.tBodies[0], tf = t.tFoot;
-  const skip = opts.noFilter || [];
   let cols = opts.cols;
   if (!cols) {
     const r = tb && tb.rows[0];
     cols = r ? r.cells.length : (t.tHead.rows[0] ? t.tHead.rows[0].cells.length : 0);
   }
   if (!cols) return;
+
+  // 欄位可經『欄位設定』拖拉排序／隱藏後，實體欄位順序會與原始順序不同。
+  // 呼叫端傳入的 noFilter／sumCols 索引為『原始順序』，這裡以表頭 data-ci 對照回目前實體位置。
+  const headerRow0 = t.tHead && t.tHead.rows[0];
+  const ciToPhys = {};
+  let hasCi = false;
+  if (headerRow0) for (let p = 0; p < headerRow0.cells.length; p++) {
+    const ci = headerRow0.cells[p].getAttribute('data-ci');
+    if (ci !== null) { ciToPhys[+ci] = p; hasCi = true; }
+  }
+  const mapCol = (i) => (hasCi && ciToPhys[i] !== undefined) ? ciToPhys[i] : i;
+  const skip = (opts.noFilter || []).map(mapCol);
 
   const BLANK = '(空白)';
 
@@ -196,6 +233,8 @@ function initTable(id, opts) {
       th.appendChild(btn);
       buttons[i] = btn;
     }
+    // 該實體欄位若已被『欄位設定』隱藏，篩選列對應格也一併隱藏
+    if (headerRow0 && headerRow0.cells[i] && headerRow0.cells[i].style.display === 'none') th.style.display = 'none';
     fr.appendChild(th);
   }
   t.tHead.appendChild(fr);
@@ -270,6 +309,10 @@ function initTable(id, opts) {
       panel.appendChild(quick);
     }
 
+    const count = document.createElement('div');
+    count.className = 'filter-panel-count';
+    panel.appendChild(count);
+
     const list = document.createElement('div');
     list.className = 'filter-panel-list';
     const checks = [];
@@ -280,17 +323,29 @@ function initTable(id, opts) {
       chk.value = v;
       chk.checked = selected.has(v);
       chk.addEventListener('change', syncAllState);
+      const txt = document.createElement('span');
+      txt.className = 'filter-opt-text';
+      txt.textContent = v;
+      txt.title = v;
       lbl.appendChild(chk);
-      lbl.appendChild(document.createTextNode(v));
+      lbl.appendChild(txt);
       list.appendChild(lbl);
       checks.push({ lbl, chk, v });
     }
+    const emptyMsg = document.createElement('div');
+    emptyMsg.className = 'filter-panel-empty';
+    emptyMsg.textContent = '找不到符合的值';
+    emptyMsg.style.display = 'none';
+    list.appendChild(emptyMsg);
     panel.appendChild(list);
 
     function syncAllState() {
       const visible = checks.filter(c => c.lbl.style.display !== 'none');
       allChk.checked = visible.length > 0 && visible.every(c => c.chk.checked);
       allChk.indeterminate = !allChk.checked && visible.some(c => c.chk.checked);
+      emptyMsg.style.display = visible.length ? 'none' : '';
+      const picked = visible.filter(c => c.chk.checked).length;
+      count.textContent = '共 ' + visible.length + ' 項，已選 ' + picked + ' 項';
     }
     syncAllState();
 
@@ -363,9 +418,10 @@ function initTable(id, opts) {
     }
     if (tf && opts.sumCols) {
       for (const sc of opts.sumCols) {
+        const phys = mapCol(sc.col);
         let sum = 0;
-        for (const r of vis) sum += pn(r.cells[sc.col] ? r.cells[sc.col].textContent : '');
-        const el = sc.id ? document.getElementById(sc.id) : (tf.rows[0] && tf.rows[0].cells[sc.col]);
+        for (const r of vis) sum += pn(r.cells[phys] ? r.cells[phys].textContent : '');
+        const el = sc.id ? document.getElementById(sc.id) : (tf.rows[0] && tf.rows[0].cells[phys]);
         if (el) el.textContent = Math.round(sum).toLocaleString('zh-TW');
       }
     }
@@ -400,6 +456,13 @@ async function exportTableToExcel(tableId, filename, opts) {
     if (r.style.display === 'none') continue;
     const cells = Array.from(r.cells).map(c => c.textContent.trim());
     rows.push(cells.filter((_, i) => !skip.has(i)));
+  }
+  // 選用：附上表尾合計列（tfoot），供帶有篩選加總的表格匯出
+  if (opts.includeFoot && t.tFoot) {
+    for (const r of t.tFoot.rows) {
+      const cells = Array.from(r.cells).map(c => c.textContent.trim());
+      rows.push(cells.filter((_, i) => !skip.has(i)));
+    }
   }
 
   const btn = opts.btn;
@@ -444,9 +507,196 @@ function downloadCsv(filename, headers, rows) {
 }
 ";
 
+    // 讓使用者自選表格要顯示的欄位並可拖拉調整順序（設定存於瀏覽器 localStorage，逐表獨立）。
+    // 使用方式：在資料填入表格後、initTable 之前呼叫 setupColumns(tableId, storageKey, {labels})。
+    public static string ColumnChooserJs => @"
+// 以原始欄位識別碼(data-ci)取得該列對應儲存格，供排序/隱藏後的加總回呼使用（欄位可能已被重新排列）。
+function cellByCi(row, ci) {
+  const cells = row.cells;
+  for (let i = 0; i < cells.length; i++)
+    if (cells[i].getAttribute('data-ci') === String(ci)) return cells[i];
+  return null;
+}
+
+function _colKey(key) { return 'colcfg:' + key; }
+function _loadColCfg(key) { try { return JSON.parse(localStorage.getItem(_colKey(key)) || 'null'); } catch (e) { return null; } }
+function _saveColCfg(key, cfg) { try { localStorage.setItem(_colKey(key), JSON.stringify(cfg)); } catch (e) {} }
+
+// 對所有『1:1』資料列（儲存格數 = 欄位數）套用欄位順序與隱藏；跨欄列（明細/區段標題）略過。
+function _applyColOrder(t, n, order, hidden) {
+  const rows = [];
+  if (t.tHead) for (const r of t.tHead.rows) rows.push(r);
+  for (const tbb of t.tBodies) for (const r of tbb.rows) rows.push(r);
+  if (t.tFoot) for (const r of t.tFoot.rows) rows.push(r);
+  for (const r of rows) {
+    if (r.cells.length !== n) continue;
+    const byCi = {};
+    for (const c of Array.from(r.cells)) byCi[c.getAttribute('data-ci')] = c;
+    for (const ci of order) {
+      const c = byCi[ci];
+      if (!c) continue;
+      c.style.display = hidden.indexOf(ci) >= 0 ? 'none' : '';
+      r.appendChild(c);
+    }
+  }
+}
+
+// 主要進入點：於 initTable 之前呼叫。標記 data-ci、套用已存設定、建立『欄位設定』按鈕。
+function setupColumns(tableId, key, opts) {
+  opts = opts || {};
+  const t = document.getElementById(tableId);
+  if (!t || !t.tHead || !t.tHead.rows[0]) return;
+  const headRow = t.tHead.rows[0];
+  const n = headRow.cells.length;
+
+  const labels = [];
+  for (let i = 0; i < n; i++)
+    labels.push((opts.labels && opts.labels[i]) || headRow.cells[i].textContent.trim() || ('欄位 ' + (i + 1)));
+
+  // 在『原始順序』下標記 data-ci
+  const tagRows = [];
+  for (const r of t.tHead.rows) tagRows.push(r);
+  for (const tbb of t.tBodies) for (const r of tbb.rows) tagRows.push(r);
+  if (t.tFoot) for (const r of t.tFoot.rows) tagRows.push(r);
+  for (const r of tagRows) {
+    if (r.cells.length !== n) continue;
+    for (let i = 0; i < n; i++)
+      if (!r.cells[i].hasAttribute('data-ci')) r.cells[i].setAttribute('data-ci', i);
+  }
+
+  const cfg = _loadColCfg(key);
+  let order, hidden;
+  if (cfg && Array.isArray(cfg.order)) {
+    order = cfg.order.filter(ci => ci >= 0 && ci < n);
+    for (let i = 0; i < n; i++) if (order.indexOf(i) < 0) order.push(i);
+    hidden = (cfg.hidden || []).filter(ci => ci >= 0 && ci < n);
+  } else {
+    order = []; for (let i = 0; i < n; i++) order.push(i);
+    // 無已存設定時，可指定部分欄位預設隱藏（使用者仍可於『欄位設定』開啟）
+    hidden = (opts.defaultHidden || []).filter(ci => ci >= 0 && ci < n);
+  }
+
+  // 重新標記＋套用；動態表格（tbody 會被重建）在每次重建後呼叫以維持欄位順序/隱藏。
+  function reapply() {
+    const rows = [];
+    for (const r of t.tHead.rows) rows.push(r);
+    for (const tbb of t.tBodies) for (const r of tbb.rows) rows.push(r);
+    if (t.tFoot) for (const r of t.tFoot.rows) rows.push(r);
+    for (const r of rows) {
+      if (r.cells.length !== n) continue;
+      for (let i = 0; i < n; i++)
+        if (!r.cells[i].hasAttribute('data-ci')) r.cells[i].setAttribute('data-ci', i);
+    }
+    _applyColOrder(t, n, order, hidden);
+  }
+  reapply();
+  _buildColBtn(tableId, key, labels, order, hidden, n);
+  return { reapply, order, hidden, n };
+}
+
+function _buildColBtn(tableId, key, labels, order, hidden, n) {
+  const t = document.getElementById(tableId);
+  const wrap = t.closest('.table-wrap') || t;
+  const bar = document.createElement('div');
+  bar.className = 'col-cfg-bar';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn btn-sm btn-outline';
+  btn.textContent = '⚙ 欄位設定';
+  btn.addEventListener('click', () => _openColModal(tableId, key, labels, order, hidden, n));
+  bar.appendChild(btn);
+  if (wrap.parentNode) wrap.parentNode.insertBefore(bar, wrap);
+}
+
+function _dragAfter(list, y) {
+  const items = Array.from(list.querySelectorAll('.col-cfg-item:not(.dragging)'));
+  let closest = null, closestOffset = -Infinity;
+  for (const el of items) {
+    const box = el.getBoundingClientRect();
+    const offset = y - box.top - box.height / 2;
+    if (offset < 0 && offset > closestOffset) { closestOffset = offset; closest = el; }
+  }
+  return closest;
+}
+
+function _openColModal(tableId, key, labels, order, hidden, n) {
+  let workOrder = order.slice();
+  let workHidden = hidden.slice();
+
+  const mask = document.createElement('div');
+  mask.className = 'col-cfg-mask';
+  const modal = document.createElement('div');
+  modal.className = 'col-cfg-modal';
+  modal.innerHTML =
+    ""<div class='col-cfg-head'><div class='col-cfg-title'>⚙ 欄位設定</div><button type='button' class='col-cfg-close' aria-label='關閉'>×</button></div>"" +
+    ""<div class='col-cfg-sub'>勾選要顯示的欄位；拖曳 ⠿ 可調整順序。設定會記在此瀏覽器。</div>"" +
+    ""<div class='col-cfg-list'></div>"" +
+    ""<div class='col-cfg-actions'><a href='#' class='col-cfg-reset'>回復預設</a>"" +
+    ""<div class='filter-panel-buttons'><button type='button' class='btn btn-sm col-cfg-apply'>套用</button>"" +
+    ""<button type='button' class='btn btn-sm btn-outline col-cfg-cancel'>取消</button></div></div>"";
+  const list = modal.querySelector('.col-cfg-list');
+
+  function syncOrderFromDom() { workOrder = Array.from(list.children).map(el => +el.dataset.ci); }
+  function renderList() {
+    list.innerHTML = '';
+    workOrder.forEach(ci => {
+      const item = document.createElement('div');
+      item.className = 'col-cfg-item';
+      item.draggable = true;
+      item.dataset.ci = ci;
+      const handle = document.createElement('span');
+      handle.className = 'col-cfg-handle';
+      handle.textContent = '⠿';
+      const chk = document.createElement('input');
+      chk.type = 'checkbox';
+      chk.checked = workHidden.indexOf(ci) < 0;
+      chk.addEventListener('change', () => {
+        if (chk.checked) workHidden = workHidden.filter(x => x !== ci);
+        else if (workHidden.indexOf(ci) < 0) workHidden.push(ci);
+      });
+      const lbl = document.createElement('span');
+      lbl.className = 'col-cfg-label';
+      lbl.textContent = labels[ci];
+      item.appendChild(handle); item.appendChild(chk); item.appendChild(lbl);
+      item.addEventListener('dragstart', e => { item.classList.add('dragging'); if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'; });
+      item.addEventListener('dragend', () => { item.classList.remove('dragging'); syncOrderFromDom(); });
+      list.appendChild(item);
+    });
+  }
+  list.addEventListener('dragover', e => {
+    e.preventDefault();
+    const dragging = list.querySelector('.dragging');
+    if (!dragging) return;
+    const after = _dragAfter(list, e.clientY);
+    if (after == null) list.appendChild(dragging);
+    else list.insertBefore(dragging, after);
+  });
+  renderList();
+
+  const close = () => { mask.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = e => { if (e.key === 'Escape') close(); };
+  modal.querySelector('.col-cfg-close').addEventListener('click', close);
+  modal.querySelector('.col-cfg-cancel').addEventListener('click', close);
+  mask.addEventListener('click', e => { if (e.target === mask) close(); });
+  modal.querySelector('.col-cfg-reset').addEventListener('click', e => {
+    e.preventDefault();
+    try { localStorage.removeItem(_colKey(key)); } catch (err) {}
+    location.reload();
+  });
+  modal.querySelector('.col-cfg-apply').addEventListener('click', () => {
+    syncOrderFromDom();
+    _saveColCfg(key, { order: workOrder, hidden: workHidden });
+    location.reload();
+  });
+  document.addEventListener('keydown', onKey);
+  mask.appendChild(modal);
+  document.body.appendChild(mask);
+}
+";
+
     public static string Page(string title, string cat, string sub, string body) =>
         $@"<!DOCTYPE html><html lang='zh-TW'><head>
 <meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>{title}</title><style>{Css}</style><script>{TableJs}{NoScrollJs}{ExportJs}</script></head><body>
+<title>{title}</title><style>{Css}</style><script>{TableJs}{NoScrollJs}{ExportJs}{ColumnChooserJs}</script></head><body>
 {Nav(cat, sub)}{body}</body></html>";
 }

@@ -134,7 +134,7 @@ public static class DebtModule
 </tr></thead>
 <tbody>{regRows}</tbody>
 <tfoot><tr>
-  <td colspan='4'>篩選合計</td>
+  <td>篩選合計</td><td></td><td></td><td></td>
   <td class='num' id='rt-principal'>—</td>
   <td class='num' id='rt-balance'>—</td>
   <td class='num'></td>
@@ -161,9 +161,9 @@ public static class DebtModule
 </tr></thead>
 <tbody>{stockRows}</tbody>
 <tfoot><tr>
-  <td colspan='7'>篩選合計</td>
+  <td>篩選合計</td><td></td><td></td><td></td><td></td><td></td><td></td>
   <td class='num' id='st-pledge'>—</td>
-  <td colspan='7'></td>
+  <td></td><td></td><td></td><td></td><td></td><td></td><td></td>
 </tr></tfoot>
 </table>
 </div>
@@ -439,16 +439,17 @@ function debtPn(s) {{ return parseFloat(String(s || '').replace(/,/g, '')) || 0;
 function debtSet(id, v) {{ const el = document.getElementById(id); if (el) el.textContent = fmt(v); }}
 function debtCard(id, v) {{ const el = document.getElementById(id); if (el) el.textContent = fmt(v) + ' 元'; }}
 
+setupColumns('reg-table', 'debt-reg', {{ labels: {{ 11: '操作' }} }});
 initTable('reg-table', {{
   cols: 12,
   noFilter: [6, 11],
   onFilter: function(vis) {{
     let totP = 0, totB = 0, totM = 0, totI = 0;
     for (const r of vis) {{
-      totP += debtPn(r.cells[4] ? r.cells[4].textContent : '');
-      totB += debtPn(r.cells[5] ? r.cells[5].textContent : '');
-      totM += debtPn(r.cells[7] ? r.cells[7].textContent : '');
-      totI += debtPn(r.cells[8] ? r.cells[8].textContent : '');
+      totP += debtPn(cellByCi(r, 4) ? cellByCi(r, 4).textContent : '');
+      totB += debtPn(cellByCi(r, 5) ? cellByCi(r, 5).textContent : '');
+      totM += debtPn(cellByCi(r, 7) ? cellByCi(r, 7).textContent : '');
+      totI += debtPn(cellByCi(r, 8) ? cellByCi(r, 8).textContent : '');
     }}
     debtSet('rt-principal', totP);
     debtSet('rt-balance', totB);
@@ -460,12 +461,13 @@ initTable('reg-table', {{
   }}
 }});
 
+setupColumns('stock-table', 'debt-stock', {{ labels: {{ 14: '操作' }} }});
 initTable('stock-table', {{
   cols: 15,
   noFilter: [5, 6, 8, 9, 10, 11, 12, 14],
   onFilter: function(vis) {{
     let tot = 0;
-    for (const r of vis) tot += debtPn(r.cells[7] ? r.cells[7].textContent : '');
+    for (const r of vis) tot += debtPn(cellByCi(r, 7) ? cellByCi(r, 7).textContent : '');
     debtSet('st-pledge', tot);
     debtCard('s-pledge', tot);
   }}
