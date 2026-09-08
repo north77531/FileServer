@@ -39,6 +39,7 @@ public static class SharedLayout
         ["life"] = [
             ("/life",          "棒棒集點卡", "cards"),
             ("/life/card/add", "新增集點卡", "cardadd"),
+            ("/life/takachiho", "高千穂搶票", "takachiho"),
         ],
         ["work"] = [
             ("/work/log",       "工作紀錄", "log"),
