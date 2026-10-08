@@ -36,7 +36,7 @@ public static class AuthModule
                 o.Cookie.HttpOnly = true;
                 o.Cookie.SameSite = SameSiteMode.Lax;
                 o.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
-                o.ExpireTimeSpan = TimeSpan.FromDays(30);
+                o.ExpireTimeSpan = TimeSpan.FromDays(365);
                 o.SlidingExpiration = true;
                 o.LoginPath = "/login";
             });
@@ -162,7 +162,7 @@ button:hover{{background:#0044aa}}
 <input type='text' id='username' name='username' autocomplete='username' required autofocus>
 <label for='password'>密碼</label>
 <input type='password' id='password' name='password' autocomplete='current-password' required>
-<label class='remember'><input type='checkbox' name='remember' checked> 記住我（30 天）</label>
+<label class='remember'><input type='checkbox' name='remember' checked> 記住我（1 年）</label>
 <button type='submit'>登入</button>
 </form>
 </body></html>";
