@@ -30,6 +30,7 @@ public static class StocksModule
         app.MapGet("/stocks/batch", BatchPage);
         app.MapPost("/api/stocks/trade", AddTrade);
         app.MapPut("/api/stocks/trade/{id}", UpdateTrade);
+        app.MapDelete("/api/stocks/trade/{id}", DeleteTrade);
         app.MapGet("/api/stocks/prices", GetPrices);
         app.MapGet("/api/stocks/backtest", RunBacktest);
         app.MapGet("/api/stocks/watchlist", GetWatchlist);
@@ -289,6 +290,20 @@ public static class StocksModule
         finally { Lock.Release(); }
 
         return Results.Ok(new { message = "交易紀錄已更新" });
+    }
+
+    static async Task<IResult> DeleteTrade(string id)
+    {
+        await Lock.WaitAsync();
+        try
+        {
+            var trades = LoadTrades();
+            if (trades.RemoveAll(t => t.Id == id) == 0) return Results.NotFound("交易紀錄不存在");
+            SaveTrades(trades);
+        }
+        finally { Lock.Release(); }
+
+        return Results.Ok(new { message = "交易紀錄已刪除" });
     }
 
     // 依買賣別、股數、成交價計算成交金額、手續費、交易稅、淨收付，產生 Trade。
@@ -1708,7 +1723,8 @@ function showMsg(m, t) {{ document.getElementById('msg').innerHTML = `<div class
 <td>{t.TradeType}</td><td>{t.Shares:N0}</td><td>{t.Price:N2}</td>
 <td>{t.Cost:N0}</td><td>{t.Commission:N0}</td><td>{t.Tax:N0}</td>
 <td class='{netCls}'>{t.NetAmount:N0}</td><td>{t.OrderNo}</td><td>{t.AccountType}</td>
-<td><a href='/stocks/history/{t.Id}/edit' class='btn btn-sm btn-outline'>編輯</a></td></tr>";
+<td><a href='/stocks/history/{t.Id}/edit' class='btn btn-sm btn-outline'>編輯</a>
+<button class='btn btn-sm btn-danger' onclick='delTrade(""{t.Id}"",""{t.Date} {t.StockName} {t.TradeType} {t.Shares:N0} 股"")'>刪除</button></td></tr>";
         });
 
         var totCost = sorted.Sum(t => t.Cost);
@@ -1751,6 +1767,12 @@ tfoot td:first-child{{text-align:left}}
 </table>
 </div>
 <script>
+async function delTrade(id, desc) {{
+  if (!confirm('確定刪除此筆交易紀錄？\n' + desc + '\n\n刪除後庫存會依剩餘交易紀錄重新計算，且無法復原。')) return;
+  const r = await fetch('/api/stocks/trade/' + id, {{ method: 'DELETE' }});
+  if (r.ok) location.reload();
+  else alert('刪除失敗：' + await r.text());
+}}
 setupColumns('hist-table', 'stocks-history', {{ labels: {{ 12: '操作' }} }});
 initTable('hist-table', {{
   cols: 13,
