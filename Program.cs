@@ -20,8 +20,12 @@ builder.Services.AddHttpClient("goodinfo", client =>
     client.Timeout = TimeSpan.FromSeconds(20);
 });
 builder.Services.AddHttpClient();
+AuthModule.AddServices(builder);
 
 var app = builder.Build();
+
+// 必須在所有路由之前：未登入一律導向登入頁
+AuthModule.UseAuth(app);
 
 StocksModule.MapRoutes(app);
 PledgeModule.MapRoutes(app);

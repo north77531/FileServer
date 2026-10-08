@@ -62,7 +62,7 @@ public static class SharedLayout
             ? $"<nav class='sub-nav'>{subLinks}</nav>"
             : "<div class='sub-spacer'></div>";
 
-        return $"<nav class='main-nav'>{mainLinks}</nav>{subNav}";
+        return $"<nav class='main-nav'>{mainLinks}<a href='/logout' class='logout'>登出</a></nav>{subNav}";
     }
 
     public static string Css => @"
@@ -71,6 +71,8 @@ body{font-family:'Microsoft JhengHei','Noto Sans TC',sans-serif;max-width:1200px
 .main-nav{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:0}
 .main-nav a{padding:9px 18px;border-radius:8px 8px 0 0;font-size:.9rem;font-weight:600;text-decoration:none;color:#666;background:#dde2e8;border:1px solid transparent;border-bottom:none;transition:background .15s}
 .main-nav a:hover:not(.active){background:#c8d0da;color:#333}
+.main-nav a.logout{margin-left:auto;background:none;color:#888;font-weight:400}
+.main-nav a.logout:hover{background:#dde2e8;color:#333}
 .main-nav a.active{background:#fff;color:#0055cc;border-color:#ddd;border-bottom-color:#fff;margin-bottom:-1px;position:relative;z-index:1}
 .sub-nav{background:#fff;padding:10px 16px;border-radius:0 8px 8px 8px;box-shadow:0 2px 8px rgba(0,0,0,.1);margin-bottom:24px;display:flex;gap:6px;flex-wrap:wrap;border:1px solid #ddd;position:relative;z-index:0}
 .sub-spacer{height:20px}
