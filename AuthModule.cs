@@ -52,11 +52,13 @@ public static class AuthModule
         });
         app.UseAuthentication();
 
-        // 除登入頁外，所有頁面與 API 都必須先登入
+        // 除登入頁與 App 公開頁（隱私權政策、支援）外，所有頁面與 API 都必須先登入
         app.Use(async (ctx, next) =>
         {
             var path = ctx.Request.Path;
-            if (path.Equals("/login", StringComparison.OrdinalIgnoreCase) || ctx.User.Identity?.IsAuthenticated == true)
+            if (path.Equals("/login", StringComparison.OrdinalIgnoreCase)
+                || path.StartsWithSegments(StampCardModule.PathPrefix)
+                || ctx.User.Identity?.IsAuthenticated == true)
             {
                 await next();
                 return;

@@ -36,6 +36,7 @@ WorkLogModule.MapRoutes(app);
 LifeModule.MapRoutes(app);
 TakachihoModule.MapRoutes(app);
 ExportModule.MapRoutes(app);
+StampCardModule.MapRoutes(app);
 
 // 首頁 → 導向股票庫存
 app.MapGet("/", ctx =>
