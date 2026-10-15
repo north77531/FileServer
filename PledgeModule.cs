@@ -573,7 +573,11 @@ refreshTable();
         return p.Principal * p.Rate / 100m / 365m * days;
     }
 
-    static List<PledgeLoan> LoadPledges()
+    // 已結算累計利息 + 尚未結算的目前區段利息（已結清者本金為 0，不再生息）
+    public static decimal TotalInterest(PledgeLoan p, DateTime asOf) =>
+        p.AccumulatedInterest + (p.ClosedDate != null ? 0 : SettleInterest(p, asOf));
+
+    public static List<PledgeLoan> LoadPledges()
     {
         if (!File.Exists(PledgesFile)) return [];
         return JsonSerializer.Deserialize<List<PledgeLoan>>(File.ReadAllText(PledgesFile), JsonOpts) ?? [];

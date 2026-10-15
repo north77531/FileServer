@@ -760,6 +760,8 @@ td.year-stock{{color:#080}}
   <div class='card'><div class='label'>現值</div><div class='value' id='s-value'>—</div></div>
   <div class='card'><div class='label'>損益</div><div class='value' id='s-pnl'>—</div></div>
   <div class='card'><div class='label'>損益率</div><div class='value' id='s-pct'>—</div></div>
+  <div class='card'><div class='label'>借款累計利息 <a href='/debt' style='font-size:.72rem;color:#999'>明細</a></div><div class='value neg' id='s-loanint'>—</div></div>
+  <div class='card'><div class='label'>投資淨利 <small style='color:#aaa'>(損益−利息)</small></div><div class='value' id='s-net'>—</div></div>
 </div>
 <div class='table-wrap'>
 <table id='inv-table'>
@@ -786,6 +788,27 @@ const curYear = new Date().getFullYear();
 
 // 今年預計配息（元/股）與股票股利（元），來源同「歷史配息」頁；抓取一次後快取於前端
 let divData = {{}};
+
+// 投資用途貸款與股票質借的累計利息（不分個股），投資淨利 = 損益 − 累計利息
+let loanInterest = null;
+async function loadLoanInterest() {{
+  try {{
+    const r = await fetch('/api/debt/investment-interest');
+    const d = await r.json();
+    loanInterest = d.total || 0;
+    const el = document.getElementById('s-loanint');
+    el.textContent = '-' + fmt(loanInterest);
+    el.title = (d.items || []).filter(i => i.interest > 0).map(i => i.source + '｜' + i.name + '：' + fmt(i.interest)).join('\n');
+  }} catch(e) {{}}
+}}
+function setNet(pnl, hasVal) {{
+  const el = document.getElementById('s-net');
+  if (!hasVal || loanInterest == null) return;
+  const net = pnl - loanInterest;
+  el.textContent = (net >= 0 ? '+' : '') + fmt(net);
+  el.className = 'value ' + cls(net);
+}}
+
 async function loadDividends(codes) {{
   try {{
     const dr = await fetch('/api/stocks/dividends/history?codes=' + codes);
@@ -871,6 +894,7 @@ async function load() {{
     document.getElementById('s-pct').textContent = fmtP(totPct);
     document.getElementById('s-pct').className = 'value ' + cls(totPnl);
   }}
+  setNet(totPnl, totValue > 0);
   document.getElementById('ts').textContent = '更新: ' + new Date().toLocaleTimeString('zh-TW');
 }}
 
@@ -904,10 +928,11 @@ function updateInvTotals(vis) {{
     document.getElementById('s-pct').textContent = fmtP(pct);
     document.getElementById('s-pct').className = 'value ' + cls(pnl);
   }}
+  setNet(pnl, hasVal);
 }}
 
 let _invCol = null;
-load().then(async () => {{
+loadLoanInterest().then(() => load()).then(async () => {{
   _invCol = setupColumns('inv-table', 'stocks-inv', {{}});
   const inv = initTable('inv-table', {{ cols: 11, onFilter: updateInvTotals }});
   if (inv) _invReapply = inv.run;

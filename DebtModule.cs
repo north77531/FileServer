@@ -17,6 +17,7 @@ public static class DebtModule
         app.MapPatch("/api/debt/{id}/balance", UpdateBalance);
         app.MapPost("/api/debt/{id}/rate", UpdateRate);
         app.MapGet("/api/debt/loans", GetLoans);
+        app.MapGet("/api/debt/investment-interest", GetInvestmentInterest);
         app.MapGet("/debt/{id}/edit", EditPage);
     }
 
@@ -31,10 +32,11 @@ public static class DebtModule
 
         // ── Regular loans table ────────────────────────────────────────────
         var regRows = regularLoans.Count == 0
-            ? "<tr><td colspan='10' style='text-align:center;padding:20px;color:#999'>尚無一般貸款資料</td></tr>"
+            ? "<tr><td colspan='13' style='text-align:center;padding:20px;color:#999'>尚無一般貸款資料</td></tr>"
             : string.Join("", regularLoans.Select(l =>
             {
                 var repayTag = string.IsNullOrEmpty(l.RepaymentMethod) ? "" : $"<span class='tag' style='margin-left:4px'>{l.RepaymentMethod}</span>";
+                if (IsForInvestment(l)) repayTag += "<span class='tag' style='margin-left:4px;background:#e8f4ff;color:#0066cc'>投資</span>";
                 var graceTag = l.LoanType == "房貸" && l.GracePeriodMonths > 0
                     ? $"<br><small style='color:#888'>寬限期 {l.GracePeriodMonths} 個月</small>" : "";
                 var computedId = $"bal-{l.Id}";
@@ -48,6 +50,7 @@ public static class DebtModule
   <td class='num'>{l.Rate:F2}%</td>
   <td class='num' id='mp-{l.Id}'>{(l.MonthlyPayment > 0 ? l.MonthlyPayment.ToString("N0") : "—")}</td>
   <td class='num' id='int-{l.Id}'>—</td>
+  <td class='num'>{AccruedInterest(l, DateTime.Today):N0}</td>
   <td>{l.StartDate}{(l.LoanType == "房貸" && !string.IsNullOrEmpty(l.GracePeriodEndDate) ? $"<br><small style='color:#888'>寬限至 {l.GracePeriodEndDate}</small>" : "")}</td>
   <td>{l.EndDate}</td>
   <td>
@@ -115,6 +118,7 @@ public static class DebtModule
   <div class='card'><div class='lbl'>一般貸款餘額合計</div><div class='val pos' id='s-balance'>計算中…</div></div>
   <div class='card'><div class='lbl'>每月還款合計</div><div class='val' id='s-monthly'>—</div></div>
   <div class='card'><div class='lbl'>年利息合計</div><div class='val pos' id='s-interest'>—</div></div>
+  <div class='card'><div class='lbl'>累計利息合計</div><div class='val pos' id='s-accint'>{regularLoans.Sum(l => AccruedInterest(l, DateTime.Today)):N0} 元</div></div>
   {(stockLoans.Count > 0 ? @"<div class='card'><div class='lbl'>股票質押借款</div><div class='val pos' id='s-pledge'>—</div></div>
   <div class='card'><div class='lbl'>平均維持率</div><div class='val' id='s-mr'>—</div></div>" : "")}
 </div>
@@ -122,14 +126,14 @@ public static class DebtModule
 {(regularLoans.Count > 0 ? $@"
 <div class='actions'>
   <h2 style='flex:1'>💳 一般貸款</h2>
-  <button class='btn btn-sm btn-outline' onclick=""exportTableToExcel('reg-table','一般貸款',{{skipCols:[11],btn:this}})"">⬇ 下載Excel</button>
+  <button class='btn btn-sm btn-outline' onclick=""exportTableToExcel('reg-table','一般貸款',{{skipCols:[12],btn:this}})"">⬇ 下載Excel</button>
 </div>
 <div class='table-wrap'>
 <table id='reg-table'>
 <thead><tr>
   <th>貸款名稱</th><th>類型</th><th>銀行</th><th>借款人</th>
   <th class='num'>原始金額</th><th class='num'>目前餘額</th>
-  <th class='num'>年利率</th><th class='num'>月付金</th><th class='num'>年利息</th>
+  <th class='num'>年利率</th><th class='num'>月付金</th><th class='num'>年利息</th><th class='num'>累計利息</th>
   <th>起始日</th><th>預計結清</th><th></th>
 </tr></thead>
 <tbody>{regRows}</tbody>
@@ -140,6 +144,7 @@ public static class DebtModule
   <td class='num'></td>
   <td class='num' id='rt-monthly'>—</td>
   <td class='num' id='rt-interest'>—</td>
+  <td class='num' id='rt-accint'>—</td>
   <td></td><td></td><td></td>
 </tr></tfoot>
 </table>
@@ -439,25 +444,28 @@ function debtPn(s) {{ return parseFloat(String(s || '').replace(/,/g, '')) || 0;
 function debtSet(id, v) {{ const el = document.getElementById(id); if (el) el.textContent = fmt(v); }}
 function debtCard(id, v) {{ const el = document.getElementById(id); if (el) el.textContent = fmt(v) + ' 元'; }}
 
-setupColumns('reg-table', 'debt-reg', {{ labels: {{ 11: '操作' }} }});
+setupColumns('reg-table', 'debt-reg', {{ labels: {{ 12: '操作' }} }});
 initTable('reg-table', {{
-  cols: 12,
-  noFilter: [6, 11],
+  cols: 13,
+  noFilter: [6, 12],
   onFilter: function(vis) {{
-    let totP = 0, totB = 0, totM = 0, totI = 0;
+    let totP = 0, totB = 0, totM = 0, totI = 0, totA = 0;
     for (const r of vis) {{
       totP += debtPn(cellByCi(r, 4) ? cellByCi(r, 4).textContent : '');
       totB += debtPn(cellByCi(r, 5) ? cellByCi(r, 5).textContent : '');
       totM += debtPn(cellByCi(r, 7) ? cellByCi(r, 7).textContent : '');
       totI += debtPn(cellByCi(r, 8) ? cellByCi(r, 8).textContent : '');
+      totA += debtPn(cellByCi(r, 9) ? cellByCi(r, 9).textContent : '');
     }}
     debtSet('rt-principal', totP);
     debtSet('rt-balance', totB);
     debtSet('rt-monthly', totM);
     debtSet('rt-interest', totI);
+    debtSet('rt-accint', totA);
     debtCard('s-balance', totB);
     debtCard('s-monthly', totM);
     debtCard('s-interest', totI);
+    debtCard('s-accint', totA);
   }}
 }});
 
@@ -657,6 +665,9 @@ initTable('stock-table', {{
 </div>
 
 <div class='field'>
+  <label style='display:flex;gap:6px;align-items:center'><input type='checkbox' id='forInvestment' style='width:auto'> 用於投資（累計利息計入股票投資淨利）</label>
+</div>
+<div class='field'>
   <label>備註</label>
   <textarea id='notes' rows='2' placeholder='選填'></textarea>
 </div>
@@ -675,6 +686,7 @@ function onTypeChange() {
   document.getElementById('regularFields').style.display = isS ? 'none' : '';
   document.getElementById('stockFields').style.display = isS ? '' : 'none';
   document.getElementById('graceFields').style.display = (type === '房貸' && !isS) ? '' : 'none';
+  document.getElementById('forInvestment').checked = ['信貸', '股票質押', '其他'].includes(type);
   const nameEl = document.getElementById('name');
   const bankEl = document.getElementById('bank');
   nameEl.value = '';
@@ -896,7 +908,8 @@ async function submitForm() {
     stockName: isS ? gv('stockName').trim() : '',
     stockPrice: isS ? gn('stockPrice') : 0,
     stockShares: isS ? gi('stockShares') : 0,
-    interestStartDate: isS ? (gv('interestStartDate') || startDate) : ''
+    interestStartDate: isS ? (gv('interestStartDate') || startDate) : '',
+    forInvestment: document.getElementById('forInvestment').checked
   };
 
   if (!req.name || !req.bank || req.principal <= 0) {
@@ -1057,6 +1070,9 @@ document.getElementById('s-startDate').value = todayStr;
 </div>
 
 <div class='field'>
+  <label style='display:flex;gap:6px;align-items:center'><input type='checkbox' id='forInvestment' style='width:auto'> 用於投資（累計利息計入股票投資淨利）</label>
+</div>
+<div class='field'>
   <label>備註</label>
   <textarea id='notes' rows='2'></textarea>
 </div>
@@ -1104,6 +1120,7 @@ function populate() {{
   sv('name', loan.name);
   sv('bank', loan.bank);
   sv('notes', loan.notes);
+  document.getElementById('forInvestment').checked = {(IsForInvestment(loan) ? "true" : "false")};
   if (loan.loanType !== '股票質押') {{
     sv('principal', loan.principal);
     sv('rate', loan.rate);
@@ -1154,7 +1171,8 @@ async function submitForm() {{
     stockName: isS ? gv('stockName').trim() : '',
     stockPrice: isS ? gn('stockPrice') : 0,
     stockShares: isS ? gi('stockShares') : 0,
-    interestStartDate: isS ? (gv('interestStartDate') || gv('s-startDate')) : ''
+    interestStartDate: isS ? (gv('interestStartDate') || gv('s-startDate')) : '',
+    forInvestment: document.getElementById('forInvestment').checked
   }};
 
   if (!req.name || !req.bank || req.principal <= 0) {{
@@ -1194,7 +1212,8 @@ populate();
             req.StockCode ?? "", req.StockName ?? "",
             req.StockPrice, req.StockShares,
             req.InterestStartDate ?? "",
-            string.IsNullOrWhiteSpace(req.Borrower) ? "周俊佑" : req.Borrower);
+            string.IsNullOrWhiteSpace(req.Borrower) ? "周俊佑" : req.Borrower,
+            null, req.ForInvestment);
 
         var loans = LoadLoans();
         loans.Add(loan);
@@ -1234,7 +1253,8 @@ populate();
             StockPrice = req.StockPrice,
             StockShares = req.StockShares,
             InterestStartDate = req.InterestStartDate ?? "",
-            Borrower = string.IsNullOrWhiteSpace(req.Borrower) ? existing.Borrower : req.Borrower
+            Borrower = string.IsNullOrWhiteSpace(req.Borrower) ? existing.Borrower : req.Borrower,
+            ForInvestment = req.ForInvestment ?? existing.ForInvestment
         };
         SaveLoans(loans);
         return Results.Ok();
@@ -1296,6 +1316,92 @@ populate();
 
     static IResult GetLoans() => Results.Json(LoadLoans());
 
+    // 投資用途貸款與股票質借的累計利息，供股票庫存頁計算投資淨利
+    static IResult GetInvestmentInterest()
+    {
+        var today = DateTime.Today;
+        var items = LoadLoans().Where(IsForInvestment)
+            .Select(l => new { source = "貸款", name = l.Name, interest = Math.Round(AccruedInterest(l, today)) })
+            .ToList();
+        items.AddRange(PledgeModule.LoadPledges()
+            .Select(p => new { source = "質借", name = $"{p.StockCode} {p.StockName}".Trim(), interest = Math.Round(PledgeModule.TotalInterest(p, today)) }));
+        return Results.Json(new { total = items.Sum(i => i.interest), items });
+    }
+
+    // ── Interest helpers ──────────────────────────────────────────────────
+
+    // 未勾選時：信貸、股票質押、其他預設為投資用途；房貸、車貸預設不是
+    public static bool IsForInvestment(Loan l) =>
+        l.ForInvestment ?? l.LoanType is "信貸" or "股票質押" or "其他";
+
+    static decimal RateAt(Loan l, DateTime date)
+    {
+        var hist = l.RateHistory;
+        if (hist == null || hist.Count == 0) return l.Rate;
+        var rate = hist[0].Rate;
+        foreach (var h in hist)
+            if (DateTime.TryParse(h.StartDate, out var s) && s.Date <= date.Date) rate = h.Rate;
+        return rate;
+    }
+
+    // 自起始日至 asOf 已產生的累計利息。
+    // 股票質押：本金 × 各段利率 ÷ 365 × 天數（與列表頁一致）。
+    // 一般貸款：以已過完整月份逐月模擬「當期餘額 × 當期月利率」，寬限期只付息，
+    // 本息均攤每月依剩餘期數重算月付金（可反映利率變動），本金均攤每月攤還固定本金。
+    public static decimal AccruedInterest(Loan l, DateTime asOf)
+    {
+        if (l.LoanType == "股票質押")
+        {
+            var hist = l.RateHistory;
+            if (hist == null || hist.Count == 0)
+            {
+                var s = !string.IsNullOrEmpty(l.InterestStartDate) ? l.InterestStartDate : l.StartDate;
+                if (!DateTime.TryParse(s, out var sd)) return 0;
+                return l.Principal * l.Rate / 100m / 365m * Math.Max(0, (asOf.Date - sd.Date).Days);
+            }
+            decimal sum = 0;
+            foreach (var h in hist)
+            {
+                if (!DateTime.TryParse(h.StartDate, out var hs)) continue;
+                var he = h.EndDate != null && DateTime.TryParse(h.EndDate, out var e) ? e : asOf;
+                sum += l.Principal * h.Rate / 100m / 365m * Math.Max(0, (he.Date - hs.Date).Days);
+            }
+            return sum;
+        }
+
+        if (!DateTime.TryParse(l.StartDate, out var start)) return 0;
+        var elapsed = (asOf.Year - start.Year) * 12 + asOf.Month - start.Month;
+        if (elapsed <= 0) return 0;
+        var N = l.TotalMonths;
+        if (N > 0) elapsed = Math.Min(elapsed, N);
+        var grace = l.LoanType == "房貸" ? l.GracePeriodMonths : 0;
+        var method = l.RepaymentMethod ?? "";
+        var amortizes = N > 0 && (method == "本息均攤" || method == "本金均攤");
+
+        decimal bal = amortizes ? l.Principal : (l.Balance > 0 ? l.Balance : l.Principal);
+        decimal total = 0;
+        for (var m = 0; m < elapsed && bal > 0; m++)
+        {
+            var rm = (double)RateAt(l, start.AddMonths(m)) / 100 / 12;
+            var interest = bal * (decimal)rm;
+            total += interest;
+            if (!amortizes || m < grace) continue;
+
+            decimal principalPart;
+            if (method == "本息均攤")
+            {
+                var remaining = N - m;
+                var pay = rm < 1e-9
+                    ? (double)bal / remaining
+                    : (double)bal * rm * Math.Pow(1 + rm, remaining) / (Math.Pow(1 + rm, remaining) - 1);
+                principalPart = (decimal)pay - interest;
+            }
+            else principalPart = l.Principal / Math.Max(1, N - grace);
+            bal = Math.Max(0, bal - principalPart);
+        }
+        return total;
+    }
+
     // ── Data helpers ──────────────────────────────────────────────────────
 
     static List<Loan> LoadLoans()
@@ -1332,7 +1438,9 @@ public record Loan(
     [property: JsonPropertyName("stockShares")] long StockShares,
     [property: JsonPropertyName("interestStartDate")] string InterestStartDate,
     [property: JsonPropertyName("borrower")] string Borrower = "周俊佑",
-    [property: JsonPropertyName("rateHistory")] List<RateEntry>? RateHistory = null);
+    [property: JsonPropertyName("rateHistory")] List<RateEntry>? RateHistory = null,
+    // 是否為投資用途（利息計入股票投資淨利）；null 時依貸款類型預設，見 DebtModule.IsForInvestment
+    [property: JsonPropertyName("forInvestment")] bool? ForInvestment = null);
 
 public record RateEntry(
     [property: JsonPropertyName("rate")] decimal Rate,
@@ -1346,7 +1454,7 @@ public record LoanRequest(
     string? RepaymentMethod, decimal MonthlyPayment, int TotalMonths,
     int GracePeriodMonths, string? GracePeriodEndDate,
     string? StockCode, string? StockName, decimal StockPrice,
-    long StockShares, string? InterestStartDate, string? Borrower);
+    long StockShares, string? InterestStartDate, string? Borrower, bool? ForInvestment = null);
 
 public record BalanceUpdateRequest(decimal Balance);
 public record RateUpdateRequest(decimal Rate, string? EffectiveDate);
