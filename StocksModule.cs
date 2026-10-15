@@ -238,9 +238,13 @@ public static class StocksModule
         return Results.Json(result);
     }
 
+    // 配股可不填成交價（價格 0）；其餘買賣別仍須成交價 > 0
+    static bool IsValidPrice(string tradeType, decimal price) =>
+        tradeType == "配股" ? price >= 0 : price > 0;
+
     static async Task<IResult> AddTrade(NewTradeRequest req, HttpContext ctx)
     {
-        if (string.IsNullOrWhiteSpace(req.StockCode) || req.Price <= 0 || req.Shares <= 0)
+        if (string.IsNullOrWhiteSpace(req.StockCode) || !IsValidPrice(req.TradeType, req.Price) || req.Shares <= 0)
             return Results.BadRequest("請填寫完整交易資料");
 
         var date = string.IsNullOrEmpty(req.Date) ? DateTime.Today.ToString("yyyy-MM-dd") : req.Date;
@@ -271,7 +275,7 @@ public static class StocksModule
 
     static async Task<IResult> UpdateTrade(string id, EditTradeRequest req)
     {
-        if (string.IsNullOrWhiteSpace(req.StockCode) || req.Price <= 0 || req.Shares <= 0)
+        if (string.IsNullOrWhiteSpace(req.StockCode) || !IsValidPrice(req.TradeType, req.Price) || req.Shares <= 0)
             return Results.BadRequest("請填寫完整交易資料");
 
         await Lock.WaitAsync();
@@ -312,7 +316,8 @@ public static class StocksModule
     {
         var isEtf = stockCode.StartsWith("00");
         var totalAmount = price * shares;
-        var commission = Math.Max(20, (long)Math.Floor(totalAmount * 0.001425m));
+        // 未填成交價的配股成交金額為 0，不收最低手續費
+        var commission = totalAmount == 0 ? 0 : Math.Max(20, (long)Math.Floor(totalAmount * 0.001425m));
         long tax = tradeType == "現賣" ? (long)Math.Floor(totalAmount * (isEtf ? 0.001m : 0.003m)) : 0;
         var netAmount = tradeType == "現買"
             ? -(long)(totalAmount + commission)
@@ -969,7 +974,7 @@ input:focus,select:focus{{outline:none;border-color:#0066cc;box-shadow:0 0 0 2px
     <input type='number' id='shares' placeholder='如: 1000' min='1' oninput='calc()'>
   </div>
   <div class='field'>
-    <label>成交價</label>
+    <label>成交價 <span style='color:#999;font-weight:normal'>(配股可不填)</span></label>
     <input type='number' id='price' placeholder='如: 100.5' step='0.01' min='0' oninput='calc()'>
   </div>
 </div>
@@ -1036,13 +1041,13 @@ async function submit() {{
     stockName: document.getElementById('name').value.trim(),
     accountType: document.getElementById('accountType').value.trim(),
     tradeType: document.getElementById('tradeType').value,
-    price: parseFloat(document.getElementById('price').value),
+    price: parseFloat(document.getElementById('price').value) || 0,
     shares: parseInt(document.getElementById('shares').value),
     date: document.getElementById('date').value,
     orderNo: document.getElementById('orderNo').value.trim()
   }};
-  if (!req.stockCode || !req.shares || !req.price) {{
-    showMsg('請填寫股號、股數及成交價', 'err'); return;
+  if (!req.stockCode || !req.shares || (!req.price && req.tradeType !== '配股')) {{
+    showMsg('請填寫股號、股數及成交價（配股可不填成交價）', 'err'); return;
   }}
   if (!req.accountType) {{ showMsg('請填寫帳戶', 'err'); return; }}
   try {{
@@ -1164,14 +1169,14 @@ async function submit() {{
     stockCode: document.getElementById('code').value.trim(),
     stockName: document.getElementById('name').value.trim(),
     tradeType: document.getElementById('tradeType').value,
-    price: parseFloat(document.getElementById('price').value),
+    price: parseFloat(document.getElementById('price').value) || 0,
     shares: parseInt(document.getElementById('shares').value),
     date: document.getElementById('date').value,
     orderNo: document.getElementById('orderNo').value.trim(),
     accountType: document.getElementById('accountType').value.trim()
   }};
-  if (!req.stockCode || !req.shares || !req.price) {{
-    showMsg('請填寫股號、股數及成交價', 'err'); return;
+  if (!req.stockCode || !req.shares || (!req.price && req.tradeType !== '配股')) {{
+    showMsg('請填寫股號、股數及成交價（配股可不填成交價）', 'err'); return;
   }}
   try {{
     const res = await fetch('/api/stocks/trade/{t.Id}', {{
