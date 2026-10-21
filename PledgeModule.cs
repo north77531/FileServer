@@ -65,7 +65,20 @@ public static class PledgeModule
 <div class='actions' style='margin-bottom:16px'>
   <h1 style='margin:0;flex:1'>🔒 股票質借</h1>
   <button class='btn btn-sm btn-outline' onclick=""exportTableToExcel('pledge-table','股票質借',{{skipCols:[12],btn:this,includeFoot:true}})"">⬇ 下載Excel</button>
+  <button class='btn btn-outline' onclick=""toggleImport()"">📄 匯入對帳單</button>
   <button class='btn' onclick=""togglePanel('new','new')"">＋ 新增質借</button>
+</div>
+
+<div id='importBox' class='form-card' style='display:none;margin-bottom:16px;max-width:none'>
+  <strong>📄 依元大證金月對帳單更新質借</strong>
+  <p style='font-size:.85rem;color:#666;margin:6px 0 10px'>選擇對帳單 PDF 或截圖，也可以直接按 Ctrl+V 貼上截圖。PDF 最準；截圖請放大到數字清楚，表格太長可分成多張一起選，重複的列會自動合併。辨識在瀏覽器內進行（第一次需下載辨識模型），完成後先列出變更，勾選確認才會寫入。</p>
+  <div class='mini-row'>
+    <div class='field'><label>對帳單 PDF／截圖（可多選）</label><input type='file' id='imp-file' accept='application/pdf,image/*' multiple style='width:280px'></div>
+    <button class='btn btn-sm' id='imp-btn' onclick='parseStatement()'>開始辨識</button>
+    <span id='imp-status' style='font-size:.85rem;color:#888'></span>
+  </div>
+  <div id='imp-raw'></div>
+  <div id='imp-result'></div>
 </div>
 
 <div class='cards' id='summaryCards'>
@@ -426,6 +439,358 @@ async function delPledge(id) {{
   if (r.ok) location.reload(); else showMsg('刪除失敗', 'err');
 }}
 
+// ── 對帳單匯入 ───────────────────────────────────────────────────────────
+let importStatement = null;
+const IMPORT_ACTIONS = {{
+  'update':        ['更新', '#0066cc'],
+  'close':         ['已還款結清', '#c60'],
+  'create':        ['新借款', '#080'],
+  'create-closed': ['新增（已還清）', '#888'],
+  'unchanged':     ['無變動', '#aaa']
+}};
+
+function toggleImport() {{
+  const box = document.getElementById('importBox');
+  box.style.display = box.style.display === 'none' ? '' : 'none';
+}}
+
+function esc(s) {{ return String(s ?? '').replace(/[&<>""']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','""':'&quot;',""'"":'&#39;'}})[c]); }}
+
+// 對帳單是「Microsoft Print to PDF」轉印檔，字已成圖形，所以在瀏覽器內 OCR：
+// PDF 以 pdf.js 放大 4 倍繪成圖、截圖直接使用 → tesseract.js 辨識 → 依數字排列規則拆成各欄
+const PDFJS = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+const PDFJS_WORKER = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+const TESSERACT = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+let ocrWorker = null, ocrProgress = () => {{}};
+
+function loadScript(src) {{
+  return new Promise((ok, fail) => {{
+    if (document.querySelector(`script[src=""${{src}}""]`)) return ok();
+    const s = document.createElement('script');
+    s.src = src; s.onload = ok; s.onerror = () => fail(new Error('無法載入 ' + src));
+    document.head.appendChild(s);
+  }});
+}}
+
+function impStatus(t) {{ document.getElementById('imp-status').textContent = t; }}
+
+// 回傳每一頁的 canvas
+async function fileToCanvases(file) {{
+  if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '')) {{
+    await loadScript(PDFJS);
+    pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER;
+    const pdf = await pdfjsLib.getDocument({{ data: await file.arrayBuffer() }}).promise;
+    const pages = [];
+    for (let n = 1; n <= pdf.numPages; n++) {{
+      const page = await pdf.getPage(n);
+      const vp = page.getViewport({{ scale: 4 }});
+      const c = document.createElement('canvas');
+      c.width = vp.width; c.height = vp.height;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+      await page.render({{ canvasContext: ctx, viewport: vp }}).promise;
+      pages.push(c);
+    }}
+    return pages;
+  }}
+  const img = await createImageBitmap(file);
+  // 截圖字太小時先放大，OCR 較準
+  const k = Math.max(1, Math.min(4, 5000 / Math.max(img.width, img.height)));
+  const c = document.createElement('canvas');
+  c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, 0, 0, c.width, c.height);
+  return [c];
+}}
+
+function rotateCanvas(src, deg) {{
+  if (!deg) return src;
+  const c = document.createElement('canvas');
+  const swap = deg % 180 !== 0;
+  c.width = swap ? src.height : src.width; c.height = swap ? src.width : src.height;
+  const ctx = c.getContext('2d');
+  ctx.translate(c.width / 2, c.height / 2); ctx.rotate(deg * Math.PI / 180);
+  ctx.drawImage(src, -src.width / 2, -src.height / 2);
+  return c;
+}}
+
+async function getOcrWorker() {{
+  await loadScript(TESSERACT);
+  if (!ocrWorker) {{
+    ocrWorker = await Tesseract.createWorker('eng', 1, {{
+      logger: m => {{ if (m.status === 'recognizing text') ocrProgress(m.progress); }}
+    }});
+    // 整頁當成單一文字區塊，表格每列才會是一行
+    await ocrWorker.setParameters({{ tessedit_pageseg_mode: '6', preserve_interword_spaces: '1' }});
+  }}
+  return ocrWorker;
+}}
+
+// 每列：序號 股號 名稱 借款日 │ 餘額張數 應繳 已繳 未繳 融資餘額 │ [沖銷方式 償還日] │ 沖銷張數 沖銷已繳 (A) (B) (C) (D)…(H)
+// 合計列：對帳日 115/09/30 之後依序 15 個數字（無償還日）
+function parseOcrText(text) {{
+  const rows = [], problems = [];
+  let statementDate = '', totals = null;
+  const isRocDate = t => /^1[01]\d(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])$/.test(t);
+  const num = t => {{ const s = t.replace(/[,.]/g, ''); return /^\d+$/.test(s) ? +s : null; }};
+  // OCR 常把序號黏在股號前（1.0050、50050、352892）：去掉「序號.」，非 00 開頭的 5～6 碼取末 4 碼
+  const normCode = t => {{
+    t = t.replace(/^\d{{1,2}}[.,]/, '');
+    return /^\d{{5,6}}$/.test(t) && !t.startsWith('00') ? t.slice(-4) : t;
+  }};
+  for (const line of text.split('\n')) {{
+    const toks = line.replace(/[|\[\]]/g, ' ').trim().split(/\s+/).filter(Boolean);
+    if (toks.length < 5) continue;
+
+    // 對帳日偶爾被讀成 1157/09/30（斜線前多一個字），故允許多一位數
+    const dm = line.match(/(1[01]\d)\d?\s*\/\s*(\d{{2}})\s*\/\s*(\d{{2}})/);
+    const di = toks.findIndex(isRocDate);
+    if (dm && di < 0) {{
+      statementDate = dm[1] + dm[2] + dm[3];
+      const after = line.slice(line.indexOf(dm[0]) + dm[0].length).split(/\s+/).map(num).filter(v => v != null);
+      if (after.length >= 15) totals = {{ shares: after[0], interestDue: after[1], balance: after[4], repaidShares: after[5], repaidUnpaidInterest: after[7], repaidPrincipal: after[8] }};
+      continue;
+    }}
+    if (di < 1) continue;
+
+    let code = '';
+    for (let k = di - 1; k >= 0 && !code; k--) {{ const c = normCode(toks[k]); if (/^\d{{4,6}}[A-Z]?$/.test(c)) code = c; }}
+    if (!code) continue;
+    // 序號以列的順序編，不採用 OCR 讀到的序號（常有誤讀、重複）
+    const seq = rows.length + 1;
+
+    const rest = toks.slice(di + 1);
+    const fixed = [];
+    let i = 0;
+    for (; i < rest.length && fixed.length < 5; i++) {{ const v = num(rest[i]); if (v != null) fixed.push(v); }}
+    // 個位數張數（如「1」）常被 OCR 漏掉，造成整列左移；以「應繳＝已繳＋未繳」判斷，左移時補空張數
+    const relOk = (a, b, c) => a === b + c;
+    if (!relOk(fixed[1], fixed[2], fixed[3]) && relOk(fixed[0], fixed[1], fixed[2])) {{
+      fixed.unshift(0);
+      fixed.pop();
+      i--; // 被多讀進來的第 5 個數字其實是沖銷張數，退回給後段
+      problems.push(`序號 ${{rows.length + 1}} 的餘額張數讀不到，請手動填入`);
+    }}
+    let repayDate = '';
+    const tail = [];
+    for (; i < rest.length; i++) {{
+      if (!repayDate && !tail.length && isRocDate(rest[i])) {{ repayDate = rest[i]; continue; }}
+      const v = num(rest[i]); if (v != null) tail.push(v);
+    }}
+    if (fixed.length < 5 || tail.length < 10) problems.push(`序號 ${{seq}} 欄位數不足，請檢查`);
+    while (tail.length < 10) tail.push(0);
+    rows.push({{
+      seq, stockCode: code, stockName: '', loanDate: toks[di],
+      shares: fixed[0] || 0, interestDue: fixed[1] || 0, interestPaid: fixed[2] || 0, interestUnpaid: fixed[3] || 0, balance: fixed[4] || 0,
+      repayMethod: repayDate ? '還款' : '', repayDate,
+      repaidShares: tail[0], repaidPaidInterest: tail[1], repaidUnpaidInterest: tail[2], repaidPrincipal: tail[3], repaidFee: tail[4]
+    }});
+  }}
+  return {{ statementDate, rows, totals, problems }};
+}}
+
+async function parseStatement(fileArg) {{
+  const files = fileArg ? [fileArg] : [...document.getElementById('imp-file').files];
+  const out = document.getElementById('imp-result');
+  document.getElementById('imp-raw').innerHTML = '';
+  if (!files.length) {{ out.innerHTML = `<div class='alert err'>請選擇對帳單 PDF 或截圖</div>`; return; }}
+  const btn = document.getElementById('imp-btn');
+  btn.disabled = true;
+  out.innerHTML = '';
+  try {{
+    impStatus('讀取檔案…');
+    const pages = [];
+    for (const f of files) pages.push(...await fileToCanvases(f));
+    impStatus('載入辨識模型…');
+    const worker = await getOcrWorker();
+    let all = {{ statementDate: '', rows: [], totals: null, problems: [] }};
+    const images = [];
+    for (let p = 0; p < pages.length; p++) {{
+      // 方向不確定（對帳單常是橫印），依序試轉，讀得到借款列的方向即採用
+      let best = null;
+      for (const deg of [0, 90, 270, 180]) {{
+        const c = rotateCanvas(pages[p], deg);
+        ocrProgress = v => impStatus(`辨識第 ${{p + 1}}/${{pages.length}} 頁（旋轉 ${{deg}}°）${{Math.round(v * 100)}}%`);
+        const {{ data }} = await worker.recognize(c);
+        const parsed = parseOcrText(data.text);
+        if (!best || parsed.rows.length > best.parsed.rows.length) best = {{ parsed, c }};
+        if (parsed.rows.length >= 3 || (parsed.rows.length && parsed.totals)) break;
+      }}
+      images.push(best.c.toDataURL('image/jpeg', 0.7));
+      // 多張截圖重疊的部分只保留一次
+      const key = r => [r.stockCode, r.loanDate, r.balance, r.repaidPrincipal].join('|');
+      const seen = new Set(all.rows.map(key));
+      all.rows.push(...best.parsed.rows.filter(r => !seen.has(key(r))));
+      all.problems.push(...best.parsed.problems);
+      all.statementDate = all.statementDate || best.parsed.statementDate;
+      all.totals = all.totals || best.parsed.totals;
+    }}
+    impStatus('');
+    all.rows.forEach((r, i) => r.seq = i + 1); // 多頁時接續編號
+    if (!all.rows.length) {{ out.innerHTML = `<div class='alert err'>讀不到任何借款列，請改用較清晰的截圖或原始 PDF</div>`; return; }}
+    if (!all.totals) all.problems.push('讀不到「合計」列，無法自動核對加總，請逐筆核對');
+    importStatement = {{
+      statementDate: all.statementDate, rows: all.rows,
+      totals: all.totals || {{ shares: 0, interestDue: 0, balance: 0, repaidShares: 0, repaidUnpaidInterest: 0, repaidPrincipal: 0 }}
+    }};
+    importProblems = all.problems;
+    importImages = images;
+    renderRawRows();
+    await refreshImportPreview();
+  }} catch(e) {{
+    impStatus('');
+    out.innerHTML = `<div class='alert err'>辨識失敗：${{esc(e.message)}}</div>`;
+  }} finally {{
+    btn.disabled = false;
+  }}
+}}
+
+// ── 辨識結果（可直接修正）────────────────────────────────────────────────
+let importProblems = [], importImages = [], previewTimer = null;
+const RAW_COLS = [
+  ['stockCode', '股號', 70], ['loanDate', '借款日', 80], ['shares', '餘額張數', 70], ['interestDue', '應繳利息', 90],
+  ['balance', '融資餘額', 110], ['repayDate', '償還日', 80], ['repaidShares', '沖銷張數', 70],
+  ['repaidUnpaidInterest', '沖銷未繳利息(A)', 100], ['repaidPrincipal', '沖銷融資金(B)', 110]
+];
+const TOTAL_COLS = ['shares', 'interestDue', 'balance', 'repaidShares', 'repaidUnpaidInterest', 'repaidPrincipal'];
+
+function renderRawRows() {{
+  const s = importStatement;
+  const cell = (k, v, w, attrs) => `<td><input ${{attrs}} data-k='${{k}}' value='${{esc(v)}}' style='width:${{w}}px;padding:2px 4px;font-size:.8rem;text-align:right' oninput='onRawEdit(this)'></td>`;
+  let html = `<details id='imp-raw-box' style='margin:12px 0' ${{importProblems.length ? 'open' : ''}}>
+    <summary style='cursor:pointer;font-size:.88rem'>🔍 辨識結果（可直接修正數字，預覽會自動更新）</summary>
+    <div style='display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start;margin-top:8px'>
+    <div class='table-wrap' style='flex:1;min-width:320px'>
+    <div style='font-size:.85rem;margin-bottom:6px'>對帳日（民國）<input data-k='statementDate' value='${{esc(s.statementDate)}}' style='width:90px;padding:2px 4px' oninput='onRawEdit(this)'> 例：1150930</div>
+    <table class='hist-table'><thead><tr><th>序號</th>${{RAW_COLS.map(c => `<th>${{c[1]}}</th>`).join('')}}</tr></thead><tbody>`;
+  s.rows.forEach((r, idx) => {{
+    html += `<tr><td>${{r.seq}}</td>${{RAW_COLS.map(([k, , w]) => cell(k, r[k], w, `data-row='${{idx}}'`)).join('')}}</tr>`;
+  }});
+  html += `<tr style='background:#f6f6f6'><td>合計</td>${{RAW_COLS.map(([k, , w]) => TOTAL_COLS.includes(k) ? cell(k, s.totals[k], w, `data-total='1'`) : '<td></td>').join('')}}</tr>`;
+  html += `</tbody></table>
+    <button class='btn btn-sm btn-outline' style='margin-top:6px' onclick='addRawRow()'>＋ 加一列（補辨識漏掉的借款）</button></div>`;
+  if (importImages.length)
+    html += `<div style='flex:1;min-width:320px;max-height:520px;overflow:auto;border:1px solid #ddd'>${{importImages.map(u => `<img src='${{u}}' style='width:100%;display:block'>`).join('')}}</div>`;
+  html += `</div></details>`;
+  document.getElementById('imp-raw').innerHTML = html;
+}}
+
+function addRawRow() {{
+  const rows = importStatement.rows;
+  rows.push({{ seq: rows.length + 1, stockCode: '', stockName: '', loanDate: '', shares: 0, interestDue: 0, interestPaid: 0, interestUnpaid: 0, balance: 0,
+    repayMethod: '', repayDate: '', repaidShares: 0, repaidPaidInterest: 0, repaidUnpaidInterest: 0, repaidPrincipal: 0, repaidFee: 0 }});
+  renderRawRows();
+  document.getElementById('imp-raw-box').open = true;
+}}
+
+function onRawEdit(el) {{
+  const k = el.dataset.k, v = el.value.trim();
+  const isText = ['stockCode', 'loanDate', 'repayDate', 'statementDate'].includes(k);
+  const val = isText ? v : (parseInt(v.replace(/,/g, '')) || 0);
+  if (k === 'statementDate') importStatement.statementDate = val;
+  else if (el.dataset.total) importStatement.totals[k] = val;
+  else {{
+    const r = importStatement.rows[+el.dataset.row];
+    r[k] = val;
+    importProblems = importProblems.filter(p => !p.startsWith(`序號 ${{r.seq}} `)); // 該列已手動修正
+    if (k === 'interestDue') r.interestUnpaid = val - r.interestPaid;
+    if (k === 'repayDate') r.repayMethod = val ? '還款' : '';
+  }}
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(refreshImportPreview, 400);
+}}
+
+async function refreshImportPreview() {{
+  const r = await fetch('/api/stocks/pledge/statement/preview', {{
+    method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(importStatement)
+  }});
+  if (!r.ok) {{ document.getElementById('imp-result').innerHTML = `<div class='alert err'>產生預覽失敗</div>`; return; }}
+  const pv = await r.json();
+  pv.warnings = [...importProblems, ...pv.warnings];
+  renderImportPreview(pv);
+}}
+
+// 匯入面板開著時可直接 Ctrl+V 貼上截圖
+document.addEventListener('paste', e => {{
+  if (document.getElementById('importBox').style.display === 'none') return;
+  const item = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/'));
+  if (!item) return;
+  e.preventDefault();
+  parseStatement(item.getAsFile());
+}});
+
+function renderImportPreview(pv) {{
+  const out = document.getElementById('imp-result');
+  const changed = pv.items.filter(i => i.action !== 'unchanged');
+  const hasNew = pv.items.some(i => i.action === 'create' || i.action === 'create-closed');
+  const diffCell = (before, after, isInt) => {{
+    const f = v => v == null ? '—' : fmt(v);
+    if (before == null) return `<td class='num'>${{f(after)}}</td>`;
+    if (Math.round(before) === Math.round(after)) return `<td class='num' style='color:#999'>${{f(after)}}</td>`;
+    return `<td class='num'><span style='color:#999'>${{f(before)}}</span> → <strong>${{f(after)}}</strong></td>`;
+  }};
+
+  let html = `<div style='margin:12px 0 6px'>對帳日 <strong>${{esc(pv.statementDate || '?')}}</strong>，共 ${{pv.items.length}} 筆借款，其中 <strong>${{changed.length}}</strong> 筆有變動。</div>`;
+  if (pv.warnings.length)
+    html += `<div class='alert err' style='font-size:.85rem'>⚠️ 辨識結果可能有誤，請先核對對帳單：<br>${{pv.warnings.map(esc).join('<br>')}}</div>`;
+  else
+    html += `<div class='alert ok' style='font-size:.85rem'>✓ 各欄逐列加總與對帳單合計列一致</div>`;
+
+  html += `<div class='table-wrap'><table class='hist-table' style='width:100%'><thead><tr>
+    <th><input type='checkbox' id='imp-all' checked onchange='document.querySelectorAll("".imp-chk"").forEach(c => c.checked = this.checked)'></th>
+    <th>序號</th><th>動作</th><th>股票</th><th>借款日</th>
+    <th style='text-align:right'>張數</th><th style='text-align:right'>借款金額</th><th style='text-align:right'>累計利息</th><th>備註</th>
+  </tr></thead><tbody>`;
+  for (const i of pv.items) {{
+    const [label, color] = IMPORT_ACTIONS[i.action] || [i.action, '#333'];
+    const isChange = i.action !== 'unchanged';
+    const note = [i.closedDate ? i.closedDate + ' 結清' : '', i.note].filter(Boolean).join(' ');
+    html += `<tr style='${{isChange ? '' : 'color:#aaa'}}'>
+      <td>${{isChange ? `<input type='checkbox' class='imp-chk' value='${{i.seq}}' checked>` : ''}}</td>
+      <td>${{i.seq}}</td>
+      <td><span style='color:${{color}};font-weight:600'>${{label}}</span></td>
+      <td>${{esc(i.stockCode)}} ${{esc(i.stockName)}}</td>
+      <td>${{esc(i.loanDate)}}</td>
+      ${{diffCell(i.sharesBefore, i.sharesAfter)}}
+      ${{diffCell(i.principalBefore, i.principalAfter)}}
+      ${{diffCell(i.interestBefore, i.interestAfter)}}
+      <td style='font-size:.8rem'>${{esc(note)}}</td>
+    </tr>`;
+  }}
+  html += `</tbody></table></div>`;
+
+  if (pv.orphans.length) {{
+    html += `<p style='font-size:.85rem;color:#888;margin:10px 0 4px'>以下未結清質借在對帳單上找不到（可能屬於其他機構），不會變動：</p><ul style='font-size:.85rem;color:#888;margin:0'>`;
+    for (const o of pv.orphans)
+      html += `<li>${{esc(o.stockCode)}} ${{esc(o.stockName)}}　${{o.shares}} 張　${{fmt(o.principal)}} 元　借款日 ${{esc(o.loanDate)}}　${{esc(o.custodyAccount)}}</li>`;
+    html += `</ul>`;
+  }}
+
+  html += `<div class='mini-row' style='margin-top:12px'>`;
+  if (hasNew) html += `<div class='field'><label>新借款利率（%）</label><input type='number' step='0.001' id='imp-rate' value='${{pv.defaultRate}}'></div>`;
+  html += changed.length
+    ? `<button class='btn btn-sm' onclick='applyStatement()'>套用勾選項目</button>`
+    : `<span style='color:#888'>資料已與對帳單一致，不需更新。</span>`;
+  html += `</div>`;
+  out.innerHTML = html;
+}}
+
+async function applyStatement() {{
+  const seqs = [...document.querySelectorAll('.imp-chk:checked')].map(c => parseInt(c.value));
+  if (!seqs.length) {{ alert('請至少勾選一筆'); return; }}
+  const rateEl = document.getElementById('imp-rate');
+  const rate = rateEl ? parseFloat(rateEl.value) || 0 : 0;
+  if (!confirm('確定依對帳單更新 ' + seqs.length + ' 筆質借？')) return;
+  const r = await fetch('/api/stocks/pledge/statement/apply', {{
+    method: 'POST', headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{ statement: importStatement, seqs, rate }})
+  }});
+  if (r.ok) location.reload();
+  else showMsg(esc(await r.text()) || '套用失敗', 'err');
+}}
+
 function showMsg(m, t) {{ document.getElementById('msg').innerHTML = `<div class='alert ${{t}}'>${{m}}</div>`; }}
 
 pledgeTable = initTable('pledge-table', {{
@@ -455,7 +820,7 @@ refreshTable();
             (req.CustodyAccount ?? "").Trim(),
             DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
             [new PledgeEvent(req.InterestSince, "新增", req.Rate, null, null, 0, req.Principal)],
-            null, (req.Notes ?? "").Trim());
+            null, (req.Notes ?? "").Trim(), req.InterestSince);
 
         var pledges = LoadPledges();
         pledges.Add(pledge);
@@ -583,7 +948,7 @@ refreshTable();
         return JsonSerializer.Deserialize<List<PledgeLoan>>(File.ReadAllText(PledgesFile), JsonOpts) ?? [];
     }
 
-    static void SavePledges(List<PledgeLoan> pledges) =>
+    public static void SavePledges(List<PledgeLoan> pledges) =>
         File.WriteAllText(PledgesFile, JsonSerializer.Serialize(pledges, JsonOpts));
 }
 
@@ -602,7 +967,9 @@ public record PledgeLoan(
     [property: JsonPropertyName("createdAt")] string CreatedAt,
     [property: JsonPropertyName("events")] List<PledgeEvent> Events,
     [property: JsonPropertyName("closedDate")] string? ClosedDate,
-    [property: JsonPropertyName("notes")] string Notes);
+    [property: JsonPropertyName("notes")] string Notes,
+    // 原始借款日，用來對應元大對帳單的「借款日」；舊資料為 null 時以第一筆事件日期代替
+    [property: JsonPropertyName("loanDate")] string? LoanDate = null);
 
 public record PledgeEvent(
     [property: JsonPropertyName("date")] string Date,
