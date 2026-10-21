@@ -16,6 +16,8 @@ public static class DebtModule
         app.MapDelete("/api/debt/{id}", DeleteLoan);
         app.MapPatch("/api/debt/{id}/balance", UpdateBalance);
         app.MapPost("/api/debt/{id}/rate", UpdateRate);
+        app.MapPost("/api/debt/{id}/payoff", PayOff);
+        app.MapDelete("/api/debt/{id}/payoff", CancelPayOff);
         app.MapGet("/api/debt/loans", GetLoans);
         app.MapGet("/api/debt/investment-interest", GetInvestmentInterest);
         app.MapGet("/debt/{id}/edit", EditPage);
@@ -40,7 +42,13 @@ public static class DebtModule
                 var graceTag = l.LoanType == "房貸" && l.GracePeriodMonths > 0
                     ? $"<br><small style='color:#888'>寬限期 {l.GracePeriodMonths} 個月</small>" : "";
                 var computedId = $"bal-{l.Id}";
-                return $@"<tr>
+                var paid = !string.IsNullOrEmpty(l.PaidOffDate);
+                if (paid) repayTag += "<span class='tag' style='margin-left:4px;background:#eee;color:#666'>已結清</span>";
+                var actions = paid
+                    ? $@"<button class='btn btn-sm btn-outline' onclick='cancelPayoff(""{l.Id}"")'>取消結清</button>"
+                    : $@"<button class='btn btn-sm btn-outline' onclick='saveBalance(""{l.Id}"")'>更新餘額</button>
+      <button class='btn btn-sm btn-outline' onclick='togglePayoff(""{l.Id}"")'>提前結清</button>";
+                return $@"<tr{(paid ? " data-paid='1' style='color:#999'" : "")}>
   <td>{System.Net.WebUtility.HtmlEncode(l.Name)}{repayTag}{graceTag}</td>
   <td><span class='tag'>{l.LoanType}</span></td>
   <td>{System.Net.WebUtility.HtmlEncode(l.Bank)}</td>
@@ -52,19 +60,41 @@ public static class DebtModule
   <td class='num' id='int-{l.Id}'>—</td>
   <td class='num'>{AccruedInterest(l, DateTime.Today):N0}</td>
   <td>{l.StartDate}{(l.LoanType == "房貸" && !string.IsNullOrEmpty(l.GracePeriodEndDate) ? $"<br><small style='color:#888'>寬限至 {l.GracePeriodEndDate}</small>" : "")}</td>
-  <td>{l.EndDate}</td>
+  <td>{l.EndDate}{(paid ? $"<br><small style='color:#c60'>{l.PaidOffDate} 提前結清{(l.PayoffAmount > 0 ? $"（{l.PayoffAmount:N0} 元）" : "")}</small>" : "")}</td>
   <td>
     <div class='actions'>
       <a href='/debt/{l.Id}/edit' class='btn btn-sm btn-outline'>編輯</a>
-      <button class='btn btn-sm btn-outline' onclick='saveBalance(""{l.Id}"")'>更新餘額</button>
+      {actions}
       <button class='btn btn-sm btn-danger' onclick='del(""{l.Id}"")'>刪除</button>
     </div>
   </td>
-</tr>";
+</tr>{(paid ? "" : PayoffFormRow(l, 13))}";
             }));
 
         // ── Stock pledge section ───────────────────────────────────────────
-        var stockRows = stockLoans.Count == 0 ? "" : string.Join("", stockLoans.Select(l => $@"
+        var stockRows = stockLoans.Count == 0 ? "" : string.Join("", stockLoans.Select(l => !string.IsNullOrEmpty(l.PaidOffDate) ? $@"
+<tr id='srow-{l.Id}' data-paid='1' style='color:#999'>
+  <td>{System.Net.WebUtility.HtmlEncode(l.Name)}<span class='tag' style='margin-left:4px;background:#eee;color:#666'>已結清</span><br><small style='color:#c60'>{l.PaidOffDate} 提前結清</small></td>
+  <td>{System.Net.WebUtility.HtmlEncode(l.Bank)}</td>
+  <td>{System.Net.WebUtility.HtmlEncode(l.Borrower)}</td>
+  <td>{l.StockCode} <span>{System.Net.WebUtility.HtmlEncode(l.StockName ?? "")}</span></td>
+  <td class='num'>{l.StockShares:N0}</td>
+  <td class='num' id='sprice-{l.Id}'>—</td>
+  <td class='num' id='smv-{l.Id}'>—</td>
+  <td class='num'>{l.Principal:N0}</td>
+  <td class='num' id='scurrate-{l.Id}'>{l.Rate:F2}%</td>
+  <td class='num' id='sdaily-{l.Id}'>—</td>
+  <td class='num' id='sinterest-{l.Id}'>—</td>
+  <td class='num' id='sowed-{l.Id}'>—</td>
+  <td class='num' id='smr-{l.Id}'>—</td>
+  <td>{l.InterestStartDate}</td>
+  <td>
+    <div class='actions'>
+      <button class='btn btn-sm btn-outline' onclick='cancelPayoff(""{l.Id}"")'>取消結清</button>
+      <button class='btn btn-sm btn-danger' onclick='del(""{l.Id}"")'>刪除</button>
+    </div>
+  </td>
+</tr>" : $@"
 <tr id='srow-{l.Id}'>
   <td>{System.Net.WebUtility.HtmlEncode(l.Name)}</td>
   <td>{System.Net.WebUtility.HtmlEncode(l.Bank)}</td>
@@ -83,10 +113,11 @@ public static class DebtModule
   <td>
     <div class='actions'>
       <button class='btn btn-sm btn-outline' onclick='toggleRateForm(""{l.Id}"")'>更改利率</button>
+      <button class='btn btn-sm btn-outline' onclick='togglePayoff(""{l.Id}"")'>提前結清</button>
       <button class='btn btn-sm btn-danger' onclick='del(""{l.Id}"")'>刪除</button>
     </div>
   </td>
-</tr>
+</tr>{PayoffFormRow(l, 15)}
 <tr id='rateDetail-{l.Id}' style='display:none' data-nofilter='1'>
   <td colspan='15' style='background:#fffbe6;border-bottom:2px solid #e6d87a;padding:0'>
     <div style='padding:14px 18px'>
@@ -197,11 +228,19 @@ function daysDiff(from, to) {{
   return Math.max(0, Math.floor((to - f) / 86400000));
 }}
 
+// 已提前結清者計息只到結清日
+function loanEnd(loan) {{
+  if (!loan.paidOffDate) return today;
+  const d = new Date(loan.paidOffDate);
+  return d < today ? d : today;
+}}
+
 function fmt(n) {{ return (isNaN(n) || n == null) ? '0' : Math.round(n).toLocaleString('zh-TW'); }}
 function fmtD(n) {{ return n.toFixed(1) + '%'; }}
 
 // ── 計算一般貸款餘額 ─────────────────────────────────────────────────────
 function calcBalance(loan) {{
+  if (loan.paidOffDate) return 0;
   const r = loan.rate / 100 / 12;
   const elapsed = monthsDiff(loan.startDate, today);
   if (!loan.startDate || isNaN(elapsed) || elapsed <= 0) return loan.balance || loan.principal;
@@ -242,12 +281,14 @@ function calcMonthlyPayment(P, r_annual, N) {{
 
 // ── 更新一般貸款顯示 ─────────────────────────────────────────────────────
 const computedBalances = {{}};
+const payoffAmounts = {{}};
 
 function updateRegularLoans() {{
   let totalBal = 0, totalMonthly = 0, totalInt = 0;
   for (const l of loans.filter(x => x.loanType !== '股票質押')) {{
     const bal = isNaN(calcBalance(l)) ? (l.balance || l.principal || 0) : calcBalance(l);
     computedBalances[l.id] = bal;
+    payoffAmounts[l.id] = bal;
     const balEl = document.getElementById('bal-' + l.id);
     if (balEl) balEl.innerHTML = '<strong>' + fmt(bal) + '</strong>';
 
@@ -256,7 +297,11 @@ function updateRegularLoans() {{
     if (intEl) intEl.textContent = fmt(annualInt);
 
     let mp = l.monthlyPayment || 0;
-    if (!mp && l.repaymentMethod === '本息均攤' && l.totalMonths > 0) {{
+    if (l.paidOffDate) {{
+      mp = 0;
+      const mpEl = document.getElementById('mp-' + l.id);
+      if (mpEl) mpEl.textContent = '—';
+    }} else if (!mp && l.repaymentMethod === '本息均攤' && l.totalMonths > 0) {{
       const N = l.loanType === '房貸' && l.gracePeriodMonths > 0
         ? l.totalMonths - l.gracePeriodMonths : l.totalMonths;
       mp = calcMonthlyPayment(l.principal, l.rate, N);
@@ -289,13 +334,14 @@ function calcAccumulatedInterest(loan) {{
   if (!hist || hist.length === 0) {{
     const startDate = loan.interestStartDate || loan.startDate;
     if (!startDate) return {{ interest: 0, dailyRate: loan.rate }};
-    const days = daysDiff(startDate, today);
+    const days = daysDiff(startDate, loanEnd(loan));
     return {{ interest: P * loan.rate / 100 / 365 * days, dailyRate: loan.rate }};
   }}
   let total = 0;
+  const stop = loanEnd(loan);
   for (const h of hist) {{
     const start = new Date(h.startDate);
-    const end = h.endDate ? new Date(h.endDate) : today;
+    const end = h.endDate && new Date(h.endDate) < stop ? new Date(h.endDate) : stop;
     const days = Math.max(0, Math.floor((end - start) / 86400000));
     total += P * h.rate / 100 / 365 * days;
   }}
@@ -308,7 +354,7 @@ async function updateStockLoans() {{
   const sl = loans.filter(x => x.loanType === '股票質押');
   if (!sl.length) return;
 
-  const codes = [...new Set(sl.map(l => l.stockCode).filter(Boolean))].join(',');
+  const codes = [...new Set(sl.filter(l => !l.paidOffDate).map(l => l.stockCode).filter(Boolean))].join(',');
   let prices = {{}};
   try {{
     const r = await fetch('/api/stocks/prices?codes=' + codes);
@@ -319,13 +365,19 @@ async function updateStockLoans() {{
 
   for (const l of sl) {{
     const {{ interest, dailyRate }} = calcAccumulatedInterest(l);
+    const set = (id, val) => {{ const el = document.getElementById(id); if (el) el.innerHTML = val; }};
+    if (l.paidOffDate) {{
+      set('sinterest-' + l.id, '<strong>' + fmt(interest) + '</strong>');
+      set('sowed-' + l.id, fmt(l.payoffAmount || l.principal + interest));
+      continue;
+    }}
     const dailyInt = l.principal * dailyRate / 100 / 365;
     const owed = l.principal + interest;
+    payoffAmounts[l.id] = owed;
     const price = prices[l.stockCode] || l.stockPrice || 0;
     const mv = price * (l.stockShares || 0) * 1000;
     const mr = owed > 0 ? mv / owed * 100 : 0;
 
-    const set = (id, val) => {{ const el = document.getElementById(id); if (el) el.innerHTML = val; }};
     set('sprice-' + l.id, price ? price.toFixed(2) : '<span class=loading>—</span>');
     set('smv-' + l.id, mv > 0 ? fmt(mv) : '—');
     set('scurrate-' + l.id, dailyRate.toFixed(3) + '%');
@@ -429,6 +481,40 @@ async function saveBalance(id) {{
   }}
 }}
 
+// ── 提前結清 ─────────────────────────────────────────────────────────────
+function togglePayoff(id) {{
+  const row = document.getElementById('payoff-' + id);
+  if (row.style.display === 'none') {{
+    document.getElementById('pod-' + id).value = today.toLocaleDateString('sv');
+    const amt = payoffAmounts[id];
+    if (amt != null) document.getElementById('poa-' + id).value = Math.round(amt);
+    row.style.display = '';
+  }} else {{
+    row.style.display = 'none';
+  }}
+}}
+
+async function submitPayoff(id) {{
+  const date = document.getElementById('pod-' + id).value;
+  const amount = parseFloat(document.getElementById('poa-' + id).value) || 0;
+  if (!date) {{ alert('請輸入結清日期'); return; }}
+  if (!confirm('確定於 ' + date + ' 提前結清？結清前的累計利息會保留。')) return;
+  const r = await fetch('/api/debt/' + id + '/payoff', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{ date, amount }})
+  }});
+  if (r.ok) location.reload();
+  else alert((await r.text()).replace(/""/g, '') || '結清失敗');
+}}
+
+async function cancelPayoff(id) {{
+  if (!confirm('取消結清，恢復為未結清狀態？')) return;
+  const r = await fetch('/api/debt/' + id + '/payoff', {{method:'DELETE'}});
+  if (r.ok) location.reload();
+  else alert('取消失敗');
+}}
+
 async function del(id) {{
   if (!confirm('確定刪除此貸款？')) return;
   const r = await fetch('/api/debt/' + id, {{method:'DELETE'}});
@@ -451,7 +537,7 @@ initTable('reg-table', {{
   onFilter: function(vis) {{
     let totP = 0, totB = 0, totM = 0, totI = 0, totA = 0;
     for (const r of vis) {{
-      totP += debtPn(cellByCi(r, 4) ? cellByCi(r, 4).textContent : '');
+      if (!r.dataset.paid) totP += debtPn(cellByCi(r, 4) ? cellByCi(r, 4).textContent : '');
       totB += debtPn(cellByCi(r, 5) ? cellByCi(r, 5).textContent : '');
       totM += debtPn(cellByCi(r, 7) ? cellByCi(r, 7).textContent : '');
       totI += debtPn(cellByCi(r, 8) ? cellByCi(r, 8).textContent : '');
@@ -475,7 +561,7 @@ initTable('stock-table', {{
   noFilter: [5, 6, 8, 9, 10, 11, 12, 14],
   onFilter: function(vis) {{
     let tot = 0;
-    for (const r of vis) tot += debtPn(cellByCi(r, 7) ? cellByCi(r, 7).textContent : '');
+    for (const r of vis) if (!r.dataset.paid) tot += debtPn(cellByCi(r, 7) ? cellByCi(r, 7).textContent : '');
     debtSet('st-pledge', tot);
     debtCard('s-pledge', tot);
   }}
@@ -485,6 +571,28 @@ initTable('stock-table', {{
         ctx.Response.ContentType = "text/html; charset=utf-8";
         await ctx.Response.WriteAsync(SharedLayout.Page("貸款管理", "debt", "list", body));
     }
+
+    // 列表中每筆未結清貸款下方的「提前結清」展開列
+    static string PayoffFormRow(Loan l, int colspan) => $@"
+<tr id='payoff-{l.Id}' style='display:none' data-nofilter='1'>
+  <td colspan='{colspan}' style='background:#f3faf3;border-bottom:2px solid #9ccf9c;padding:0'>
+    <div style='padding:14px 18px'>
+      <p style='font-size:.85rem;color:#666;margin:0 0 10px'>結清後餘額歸零、不再計息；結清日前已發生的利息會保留在累計利息中。</p>
+      <div style='display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap'>
+        <div class='field' style='margin:0'>
+          <label style='font-size:.82rem'>結清日期</label>
+          <input type='date' id='pod-{l.Id}' style='width:150px'>
+        </div>
+        <div class='field' style='margin:0'>
+          <label style='font-size:.82rem'>結清金額（元，選填）</label>
+          <input type='number' id='poa-{l.Id}' style='width:160px'>
+        </div>
+        <button class='btn btn-sm' onclick='submitPayoff(""{l.Id}"")'>確認結清</button>
+        <button class='btn btn-sm btn-outline' onclick='togglePayoff(""{l.Id}"")'>取消</button>
+      </div>
+    </div>
+  </td>
+</tr>";
 
     // ── Add page ──────────────────────────────────────────────────────────
 
@@ -1314,6 +1422,38 @@ populate();
         return Results.Ok();
     }
 
+    // 提前結清：只記錄結清日與金額，不動原始資料，累計利息由 AccruedInterest 截至結清日
+    static IResult PayOff(string id, PayoffRequest req)
+    {
+        if (!DateTime.TryParse(req.Date, out var date)) return Results.BadRequest("請輸入結清日期");
+        var loans = LoadLoans();
+        var idx = loans.FindIndex(l => l.Id == id);
+        if (idx < 0) return Results.NotFound();
+
+        var loan = loans[idx];
+        var start = !string.IsNullOrEmpty(loan.InterestStartDate) ? loan.InterestStartDate : loan.StartDate;
+        if (DateTime.TryParse(start, out var sd) && date.Date < sd.Date)
+            return Results.BadRequest("結清日期不可早於起始日");
+
+        loans[idx] = loan with
+        {
+            PaidOffDate = date.ToString("yyyy-MM-dd"),
+            PayoffAmount = req.Amount > 0 ? req.Amount : null
+        };
+        SaveLoans(loans);
+        return Results.Ok();
+    }
+
+    static IResult CancelPayOff(string id)
+    {
+        var loans = LoadLoans();
+        var idx = loans.FindIndex(l => l.Id == id);
+        if (idx < 0) return Results.NotFound();
+        loans[idx] = loans[idx] with { PaidOffDate = null, PayoffAmount = null };
+        SaveLoans(loans);
+        return Results.Ok();
+    }
+
     static IResult GetLoans() => Results.Json(LoadLoans());
 
     // 投資用途貸款與股票質借的累計利息，供股票庫存頁計算投資淨利
@@ -1348,8 +1488,12 @@ populate();
     // 股票質押：本金 × 各段利率 ÷ 365 × 天數（與列表頁一致）。
     // 一般貸款：以已過完整月份逐月模擬「當期餘額 × 當期月利率」，寬限期只付息，
     // 本息均攤每月依剩餘期數重算月付金（可反映利率變動），本金均攤每月攤還固定本金。
+    // 已提前結清者，利息只算到結清日；結清前最後未滿一個月的部分按日計息。
     public static decimal AccruedInterest(Loan l, DateTime asOf)
     {
+        var settled = DateTime.TryParse(l.PaidOffDate, out var paidOff);
+        if (settled && paidOff.Date < asOf.Date) asOf = paidOff.Date;
+
         if (l.LoanType == "股票質押")
         {
             var hist = l.RateHistory;
@@ -1363,7 +1507,7 @@ populate();
             foreach (var h in hist)
             {
                 if (!DateTime.TryParse(h.StartDate, out var hs)) continue;
-                var he = h.EndDate != null && DateTime.TryParse(h.EndDate, out var e) ? e : asOf;
+                var he = h.EndDate != null && DateTime.TryParse(h.EndDate, out var e) && e < asOf ? e : asOf;
                 sum += l.Principal * h.Rate / 100m / 365m * Math.Max(0, (he.Date - hs.Date).Days);
             }
             return sum;
@@ -1371,8 +1515,12 @@ populate();
 
         if (!DateTime.TryParse(l.StartDate, out var start)) return 0;
         var elapsed = (asOf.Year - start.Year) * 12 + asOf.Month - start.Month;
-        if (elapsed <= 0) return 0;
+        // 結清者只算完整月份，剩下的天數另外按日計息
+        if (settled && elapsed > 0 && start.AddMonths(elapsed) > asOf) elapsed--;
+        if (elapsed <= 0 && !settled) return 0;
+        elapsed = Math.Max(0, elapsed);
         var N = l.TotalMonths;
+        var partial = !settled || (N > 0 && elapsed >= N) ? 0 : Math.Max(0, (asOf.Date - start.AddMonths(elapsed).Date).Days);
         if (N > 0) elapsed = Math.Min(elapsed, N);
         var grace = l.LoanType == "房貸" ? l.GracePeriodMonths : 0;
         var method = l.RepaymentMethod ?? "";
@@ -1399,6 +1547,8 @@ populate();
             else principalPart = l.Principal / Math.Max(1, N - grace);
             bal = Math.Max(0, bal - principalPart);
         }
+        if (partial > 0 && bal > 0)
+            total += bal * RateAt(l, asOf) / 100m / 365m * partial;
         return total;
     }
 
@@ -1440,7 +1590,10 @@ public record Loan(
     [property: JsonPropertyName("borrower")] string Borrower = "周俊佑",
     [property: JsonPropertyName("rateHistory")] List<RateEntry>? RateHistory = null,
     // 是否為投資用途（利息計入股票投資淨利）；null 時依貸款類型預設，見 DebtModule.IsForInvestment
-    [property: JsonPropertyName("forInvestment")] bool? ForInvestment = null);
+    [property: JsonPropertyName("forInvestment")] bool? ForInvestment = null,
+    // 提前結清日（yyyy-MM-dd）；有值時餘額視為 0，累計利息只算到這天為止
+    [property: JsonPropertyName("paidOffDate")] string? PaidOffDate = null,
+    [property: JsonPropertyName("payoffAmount")] decimal? PayoffAmount = null);
 
 public record RateEntry(
     [property: JsonPropertyName("rate")] decimal Rate,
@@ -1458,3 +1611,4 @@ public record LoanRequest(
 
 public record BalanceUpdateRequest(decimal Balance);
 public record RateUpdateRequest(decimal Rate, string? EffectiveDate);
+public record PayoffRequest(string? Date, decimal Amount);
