@@ -60,7 +60,7 @@ public static class DebtModule
   <td class='num' id='int-{l.Id}'>—</td>
   <td class='num'>{AccruedInterest(l, DateTime.Today):N0}</td>
   <td>{l.StartDate}{(l.LoanType == "房貸" && !string.IsNullOrEmpty(l.GracePeriodEndDate) ? $"<br><small style='color:#888'>寬限至 {l.GracePeriodEndDate}</small>" : "")}</td>
-  <td>{l.EndDate}{(paid ? $"<br><small style='color:#c60'>{l.PaidOffDate} 提前結清{(l.PayoffAmount > 0 ? $"（{l.PayoffAmount:N0} 元）" : "")}</small>" : "")}</td>
+  <td>{l.EndDate}{(paid ? "<br>" + PayoffNote(l) : "")}</td>
   <td>
     <div class='actions'>
       <a href='/debt/{l.Id}/edit' class='btn btn-sm btn-outline'>編輯</a>
@@ -74,7 +74,7 @@ public static class DebtModule
         // ── Stock pledge section ───────────────────────────────────────────
         var stockRows = stockLoans.Count == 0 ? "" : string.Join("", stockLoans.Select(l => !string.IsNullOrEmpty(l.PaidOffDate) ? $@"
 <tr id='srow-{l.Id}' data-paid='1' style='color:#999'>
-  <td>{System.Net.WebUtility.HtmlEncode(l.Name)}<span class='tag' style='margin-left:4px;background:#eee;color:#666'>已結清</span><br><small style='color:#c60'>{l.PaidOffDate} 提前結清</small></td>
+  <td>{System.Net.WebUtility.HtmlEncode(l.Name)}<span class='tag' style='margin-left:4px;background:#eee;color:#666'>已結清</span><br>{PayoffNote(l)}</td>
   <td>{System.Net.WebUtility.HtmlEncode(l.Bank)}</td>
   <td>{System.Net.WebUtility.HtmlEncode(l.Borrower)}</td>
   <td>{l.StockCode} <span>{System.Net.WebUtility.HtmlEncode(l.StockName ?? "")}</span></td>
@@ -239,10 +239,10 @@ function fmt(n) {{ return (isNaN(n) || n == null) ? '0' : Math.round(n).toLocale
 function fmtD(n) {{ return n.toFixed(1) + '%'; }}
 
 // ── 計算一般貸款餘額 ─────────────────────────────────────────────────────
-function calcBalance(loan) {{
+function calcBalance(loan, at) {{
   if (loan.paidOffDate) return 0;
   const r = loan.rate / 100 / 12;
-  const elapsed = monthsDiff(loan.startDate, today);
+  const elapsed = monthsDiff(loan.startDate, at || today);
   if (!loan.startDate || isNaN(elapsed) || elapsed <= 0) return loan.balance || loan.principal;
 
   let P = loan.principal;
@@ -281,14 +281,12 @@ function calcMonthlyPayment(P, r_annual, N) {{
 
 // ── 更新一般貸款顯示 ─────────────────────────────────────────────────────
 const computedBalances = {{}};
-const payoffAmounts = {{}};
 
 function updateRegularLoans() {{
   let totalBal = 0, totalMonthly = 0, totalInt = 0;
   for (const l of loans.filter(x => x.loanType !== '股票質押')) {{
     const bal = isNaN(calcBalance(l)) ? (l.balance || l.principal || 0) : calcBalance(l);
     computedBalances[l.id] = bal;
-    payoffAmounts[l.id] = bal;
     const balEl = document.getElementById('bal-' + l.id);
     if (balEl) balEl.innerHTML = '<strong>' + fmt(bal) + '</strong>';
 
@@ -367,13 +365,13 @@ async function updateStockLoans() {{
     const {{ interest, dailyRate }} = calcAccumulatedInterest(l);
     const set = (id, val) => {{ const el = document.getElementById(id); if (el) el.innerHTML = val; }};
     if (l.paidOffDate) {{
-      set('sinterest-' + l.id, '<strong>' + fmt(interest) + '</strong>');
+      const extra = l.payoffAmount && l.payoffBalance ? Math.max(0, l.payoffAmount - l.payoffBalance) : 0;
+      set('sinterest-' + l.id, '<strong>' + fmt(interest + extra) + '</strong>');
       set('sowed-' + l.id, fmt(l.payoffAmount || l.principal + interest));
       continue;
     }}
     const dailyInt = l.principal * dailyRate / 100 / 365;
     const owed = l.principal + interest;
-    payoffAmounts[l.id] = owed;
     const price = prices[l.stockCode] || l.stockPrice || 0;
     const mv = price * (l.stockShares || 0) * 1000;
     const mr = owed > 0 ? mv / owed * 100 : 0;
@@ -482,27 +480,54 @@ async function saveBalance(id) {{
 }}
 
 // ── 提前結清 ─────────────────────────────────────────────────────────────
+// 結清日當下系統計算的應還金額：一般貸款為餘額，股票質押為本金＋累計利息
+function payoffBase(id) {{
+  const loan = loans.find(l => l.id === id);
+  const date = document.getElementById('pod-' + id).value;
+  if (!date) return null;
+  if (loan.loanType === '股票質押')
+    return loan.principal + calcAccumulatedInterest({{ ...loan, paidOffDate: date }}).interest;
+  return calcBalance(loan, new Date(date));
+}}
+
 function togglePayoff(id) {{
   const row = document.getElementById('payoff-' + id);
   if (row.style.display === 'none') {{
     document.getElementById('pod-' + id).value = today.toLocaleDateString('sv');
-    const amt = payoffAmounts[id];
-    if (amt != null) document.getElementById('poa-' + id).value = Math.round(amt);
+    onPayoffDate(id);
     row.style.display = '';
   }} else {{
     row.style.display = 'none';
   }}
 }}
 
+function onPayoffDate(id) {{
+  const base = payoffBase(id);
+  if (base != null) document.getElementById('poa-' + id).value = Math.round(base);
+  showPayoffDiff(id);
+}}
+
+function showPayoffDiff(id) {{
+  const base = payoffBase(id);
+  const amount = parseFloat(document.getElementById('poa-' + id).value) || 0;
+  const el = document.getElementById('podiff-' + id);
+  if (base == null) {{ el.innerHTML = ''; return; }}
+  const diff = amount ? Math.round(amount - base) : 0;
+  el.innerHTML = '系統計算應還 <strong>' + fmt(base) + '</strong> 元' +
+    (diff > 0 ? '，多付 <strong style=\'color:#c00\'>' + fmt(diff) + '</strong> 元將視為結清費用計入累計利息'
+      : diff < 0 ? '，少付 ' + fmt(-diff) + ' 元（多半是估算誤差，不計入）' : '');
+}}
+
 async function submitPayoff(id) {{
   const date = document.getElementById('pod-' + id).value;
   const amount = parseFloat(document.getElementById('poa-' + id).value) || 0;
   if (!date) {{ alert('請輸入結清日期'); return; }}
+  const balance = payoffBase(id) || 0;
   if (!confirm('確定於 ' + date + ' 提前結清？結清前的累計利息會保留。')) return;
   const r = await fetch('/api/debt/' + id + '/payoff', {{
     method: 'POST',
     headers: {{'Content-Type': 'application/json'}},
-    body: JSON.stringify({{ date, amount }})
+    body: JSON.stringify({{ date, amount, balance }})
   }});
   if (r.ok) location.reload();
   else alert((await r.text()).replace(/""/g, '') || '結清失敗');
@@ -572,6 +597,15 @@ initTable('stock-table', {{
         await ctx.Response.WriteAsync(SharedLayout.Page("貸款管理", "debt", "list", body));
     }
 
+    static string PayoffNote(Loan l)
+    {
+        var diff = PayoffDiff(l);
+        var amount = l.PayoffAmount > 0 ? $"（{l.PayoffAmount:N0} 元）" : "";
+        var diffNote = diff > 0 ? $"<br>額外費用 {diff:N0} 元已計入累計利息"
+            : diff < 0 ? $"<br>較計算少 {-diff:N0} 元，未計入" : "";
+        return $"<small style='color:#c60'>{l.PaidOffDate} 提前結清{amount}{diffNote}</small>";
+    }
+
     // 列表中每筆未結清貸款下方的「提前結清」展開列
     static string PayoffFormRow(Loan l, int colspan) => $@"
 <tr id='payoff-{l.Id}' style='display:none' data-nofilter='1'>
@@ -581,15 +615,16 @@ initTable('stock-table', {{
       <div style='display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap'>
         <div class='field' style='margin:0'>
           <label style='font-size:.82rem'>結清日期</label>
-          <input type='date' id='pod-{l.Id}' style='width:150px'>
+          <input type='date' id='pod-{l.Id}' style='width:150px' onchange='onPayoffDate(""{l.Id}"")'>
         </div>
         <div class='field' style='margin:0'>
-          <label style='font-size:.82rem'>結清金額（元，選填）</label>
-          <input type='number' id='poa-{l.Id}' style='width:160px'>
+          <label style='font-size:.82rem'>實際結清金額（元）</label>
+          <input type='number' id='poa-{l.Id}' style='width:160px' oninput='showPayoffDiff(""{l.Id}"")'>
         </div>
         <button class='btn btn-sm' onclick='submitPayoff(""{l.Id}"")'>確認結清</button>
         <button class='btn btn-sm btn-outline' onclick='togglePayoff(""{l.Id}"")'>取消</button>
       </div>
+      <div id='podiff-{l.Id}' style='font-size:.85rem;margin-top:8px'></div>
     </div>
   </td>
 </tr>";
@@ -1438,7 +1473,8 @@ populate();
         loans[idx] = loan with
         {
             PaidOffDate = date.ToString("yyyy-MM-dd"),
-            PayoffAmount = req.Amount > 0 ? req.Amount : null
+            PayoffAmount = req.Amount > 0 ? req.Amount : null,
+            PayoffBalance = req.Balance > 0 ? Math.Round(req.Balance) : null
         };
         SaveLoans(loans);
         return Results.Ok();
@@ -1449,7 +1485,7 @@ populate();
         var loans = LoadLoans();
         var idx = loans.FindIndex(l => l.Id == id);
         if (idx < 0) return Results.NotFound();
-        loans[idx] = loans[idx] with { PaidOffDate = null, PayoffAmount = null };
+        loans[idx] = loans[idx] with { PaidOffDate = null, PayoffAmount = null, PayoffBalance = null };
         SaveLoans(loans);
         return Results.Ok();
     }
@@ -1488,8 +1524,21 @@ populate();
     // 股票質押：本金 × 各段利率 ÷ 365 × 天數（與列表頁一致）。
     // 一般貸款：以已過完整月份逐月模擬「當期餘額 × 當期月利率」，寬限期只付息，
     // 本息均攤每月依剩餘期數重算月付金（可反映利率變動），本金均攤每月攤還固定本金。
-    // 已提前結清者，利息只算到結清日；結清前最後未滿一個月的部分按日計息。
+    // 結清實付 − 結清時計算金額；正值為違約金、手續費等額外成本，負值多半是估算誤差、不計入
+    public static decimal PayoffDiff(Loan l) =>
+        l.PayoffAmount > 0 && l.PayoffBalance > 0 ? l.PayoffAmount.Value - l.PayoffBalance.Value : 0;
+
+    // 累計利息＋（已過結清日時）結清額外費用
     public static decimal AccruedInterest(Loan l, DateTime asOf)
+    {
+        var interest = InterestUntil(l, asOf);
+        if (DateTime.TryParse(l.PaidOffDate, out var paidOff) && paidOff.Date <= asOf.Date)
+            interest += Math.Max(0, PayoffDiff(l));
+        return interest;
+    }
+
+    // 已提前結清者，利息只算到結清日；結清前最後未滿一個月的部分按日計息。
+    static decimal InterestUntil(Loan l, DateTime asOf)
     {
         var settled = DateTime.TryParse(l.PaidOffDate, out var paidOff);
         if (settled && paidOff.Date < asOf.Date) asOf = paidOff.Date;
@@ -1593,7 +1642,9 @@ public record Loan(
     [property: JsonPropertyName("forInvestment")] bool? ForInvestment = null,
     // 提前結清日（yyyy-MM-dd）；有值時餘額視為 0，累計利息只算到這天為止
     [property: JsonPropertyName("paidOffDate")] string? PaidOffDate = null,
-    [property: JsonPropertyName("payoffAmount")] decimal? PayoffAmount = null);
+    [property: JsonPropertyName("payoffAmount")] decimal? PayoffAmount = null,
+    // 結清當下系統算出的應還金額；實付高於此值的差額視為結清費用計入累計利息
+    [property: JsonPropertyName("payoffBalance")] decimal? PayoffBalance = null);
 
 public record RateEntry(
     [property: JsonPropertyName("rate")] decimal Rate,
@@ -1611,4 +1662,4 @@ public record LoanRequest(
 
 public record BalanceUpdateRequest(decimal Balance);
 public record RateUpdateRequest(decimal Rate, string? EffectiveDate);
-public record PayoffRequest(string? Date, decimal Amount);
+public record PayoffRequest(string? Date, decimal Amount, decimal Balance);
