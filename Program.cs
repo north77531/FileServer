@@ -28,7 +28,8 @@ var app = builder.Build();
 AuthModule.UseAuth(app);
 
 StocksModule.MapRoutes(app);
-PassbookImport.MapRoutes(app);
+PassbookCheck.MapRoutes(app);
+BrokerStatementImport.MapRoutes(app);
 PledgeModule.MapRoutes(app);
 PledgeStatementImport.MapRoutes(app);
 DebtModule.MapRoutes(app);

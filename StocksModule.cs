@@ -1042,8 +1042,15 @@ input:focus,select:focus{{outline:none;border-color:#0066cc;box-shadow:0 0 0 2px
 <button class='btn' onclick='submit()'>確認送出</button>
 </div>
 <div class='form-card pb-card'>
-<h2>📥 集保 E 存摺匯入</h2>
-<p class='pb-hint'>上傳集保 e 存摺「交易明細」PDF，系統會與既有交易紀錄比對（同日、同股號、同買賣別加總股數），只匯入尚未登錄的買進／賣出，已存在的不會重複寫入；擔保品撥轉、存券匯撥等非交易異動會略過。<br>存摺沒有成交價，預設帶入當日收盤價，請依實際成交價修改。</p>
+<h2>📥 券商對帳單匯入</h2>
+<p class='pb-hint'>上傳券商 App／網站匯出的成交對帳單 CSV（目前內建國泰證券格式，其他券商會依欄名自動辨識，認不出來可手動指定欄位，指定一次後同格式會自動套用）。<br>系統會與既有交易比對（有委託書號時以「日期＋書號＋股數＋價格」比對），已存在的不會重複寫入；手續費、交易稅、淨收付以對帳單為準。</p>
+<input type='file' id='st-file' accept='.csv,text/csv' onchange='stParse()'>
+<div id='st-status' class='pb-hint' style='margin-top:8px'></div>
+<div id='st-result'></div>
+</div>
+<div class='form-card pb-card'>
+<h2>🔍 集保 E 存摺核對</h2>
+<p class='pb-hint'>上傳集保 e 存摺「交易明細」PDF，檢查存摺上的買進／賣出是否都已登錄（同日、同股號、同買賣別加總股數比對）。這裡只核對、不寫入；缺少的交易請用上方的券商對帳單匯入補上。擔保品撥轉、存券匯撥等非交易異動會略過。</p>
 <input type='file' id='pb-file' accept='application/pdf,.pdf' onchange='pbParse()'>
 <div id='pb-status' class='pb-hint' style='margin-top:8px'></div>
 <div id='pb-result'></div>
@@ -1052,17 +1059,179 @@ input:focus,select:focus{{outline:none;border-color:#0066cc;box-shadow:0 0 0 2px
 const today = new Date().toISOString().slice(0,10);
 document.getElementById('date').value = today;
 
-// ── 集保 E 存摺匯入 ──────────────────────────────────────────────────────
+// ── 券商對帳單匯入 ───────────────────────────────────────────────────────
+// 瀏覽器只負責把 CSV 拆成表格；找表頭、對應欄位、比對重複都在伺服器端
+const ST_FIELDS = [
+  ['date', '成交日期', true], ['code', '股號', false], ['name', '股名', false], ['type', '買賣別', true],
+  ['shares', '成交股數', true], ['price', '成交價', true], ['commission', '手續費', false],
+  ['tax', '交易稅', false], ['net', '淨收付金額', false], ['orderNo', '委託書號', false]
+];
+const ST_STATUS = {{ 'new': ['新交易', '#080'], 'suspect': ['疑似已登錄', '#c60'], 'duplicate': ['已存在', '#aaa'] }};
+const ST_SOURCE = {{ 'builtin': '內建格式', 'saved': '已儲存的欄位對應', 'auto': '依欄名自動辨識', 'manual': '手動指定' }};
+let stTable = null, stPreview = null, stShowDup = false;
+
+function stStatus(t) {{ document.getElementById('st-status').textContent = t; }}
+
+// 券商 CSV 有 UTF-8（含 BOM）也有 Big5，先試 UTF-8，失敗改用 Big5
+async function readText(file) {{
+  const buf = await file.arrayBuffer();
+  try {{ return new TextDecoder('utf-8', {{ fatal: true }}).decode(buf); }}
+  catch {{ return new TextDecoder('big5').decode(buf); }}
+}}
+
+function parseCsv(text) {{
+  const rows = [];
+  let row = [], cell = '', q = false;
+  text = text.replace(/^﻿/, '');
+  for (let i = 0; i < text.length; i++) {{
+    const ch = text[i];
+    if (q) {{
+      if (ch === '""') {{ if (text[i + 1] === '""') {{ cell += '""'; i++; }} else q = false; }}
+      else cell += ch;
+    }} else if (ch === '""') q = true;
+    else if (ch === ',') {{ row.push(cell); cell = ''; }}
+    else if (ch === '\n' || ch === '\r') {{
+      if (ch === '\r' && text[i + 1] === '\n') i++;
+      row.push(cell); rows.push(row); row = []; cell = '';
+    }} else cell += ch;
+  }}
+  if (cell !== '' || row.length) {{ row.push(cell); rows.push(row); }}
+  return rows;
+}}
+
+async function stParse() {{
+  const file = document.getElementById('st-file').files[0];
+  document.getElementById('st-result').innerHTML = '';
+  if (!file) return;
+  try {{
+    stStatus('讀取檔案…');
+    stTable = parseCsv(await readText(file));
+    await stLoad({{}});
+  }} catch (e) {{
+    stStatus('');
+    document.getElementById('st-result').innerHTML = `<div class='alert err'>讀取失敗：${{esc(e.message)}}</div>`;
+  }}
+}}
+
+async function stLoad(extra, doneMsg) {{
+  stStatus('比對既有交易…');
+  const res = await fetch('/api/stocks/trade/statement/preview', {{
+    method: 'POST', headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{ table: stTable, ...extra }})
+  }});
+  stStatus('');
+  if (!res.ok) {{ document.getElementById('st-result').innerHTML = `<div class='alert err'>${{esc(await errText(res) || '比對失敗')}}</div>`; return; }}
+  stPreview = await res.json();
+  stRender(doneMsg);
+}}
+
+function stMappingPanel(p) {{
+  const open = p.missing.length > 0;
+  let html = `<details ${{open ? 'open' : ''}} style='margin:10px 0'><summary style='cursor:pointer;font-size:.85rem;color:#0066cc'>欄位對應（${{esc(ST_SOURCE[p.source] || '')}}${{p.broker ? '・' + esc(p.broker) : ''}}）</summary>`;
+  if (p.headerRow < 0) return html + `<p class='pb-hint'>找不到表頭列。</p></details>`;
+  const rowOpts = stTable.slice(0, 15).map((r, i) =>
+    `<option value='${{i}}' ${{i === p.headerRow ? 'selected' : ''}}>第 ${{i + 1}} 列：${{esc(r.join(' ').slice(0, 40))}}</option>`).join('');
+  html += `<div class='field' style='margin:8px 0'><label>表頭（欄位名稱）在哪一列</label>
+    <select onchange='stLoad({{ headerRow: +this.value }})'>${{rowOpts}}</select></div>
+    <p class='pb-hint' style='margin:8px 0'>＊為必要欄位；股號與股名至少要有一個。</p><div class='row2'>`;
+  for (const [f, label, req] of ST_FIELDS) {{
+    const cur = p.mapping[f] ?? -1;
+    html += `<div class='field' style='margin-bottom:8px'><label>${{label}}${{req ? ' ＊' : ''}}</label><select class='st-map' data-field='${{f}}'>
+      <option value='-1'>（無）</option>${{p.headers.map((h, i) => `<option value='${{i}}' ${{i === cur ? 'selected' : ''}}>${{esc(h || '第 ' + (i + 1) + ' 欄')}}</option>`).join('')}}</select></div>`;
+  }}
+  html += `</div><button class='btn' style='width:auto;padding:7px 18px' onclick='stApplyMapping()'>套用並記住這個對應</button></details>`;
+  return html;
+}}
+
+function stRender(doneMsg) {{
+  const p = stPreview;
+  let html = doneMsg ? `<div class='alert ok'>${{esc(doneMsg)}}</div>` : '';
+  html += stMappingPanel(p);
+  if (p.missing.length) {{
+    const names = p.missing.map(f => (ST_FIELDS.find(x => x[0] === f) || [f, f])[1]);
+    html += `<div class='alert err'>認不出必要欄位：${{esc(names.join('、'))}}，請在上方「欄位對應」指定後按套用。</div>`;
+    for (const w of p.warnings) html += `<div class='alert err'>${{esc(w)}}</div>`;
+    document.getElementById('st-result').innerHTML = html;
+    return;
+  }}
+  const count = s => p.items.filter(i => i.status === s).length;
+  const dup = count('duplicate');
+  const acc = document.getElementById('st-account')?.value || p.suggestedAccount;
+  html += `<p class='pb-hint' style='margin:8px 0'>成交 ${{p.items.length}} 筆：新交易 ${{count('new')}}、疑似已登錄 ${{count('suspect')}}（預設不勾選，請確認）、已存在 ${{dup}}</p>`;
+  for (const w of p.warnings) html += `<div class='alert err'>${{esc(w)}}</div>`;
+  if (dup) html += `<label style='display:inline-flex;gap:6px;align-items:center;font-weight:normal'><input type='checkbox' style='width:auto' ${{stShowDup ? 'checked' : ''}} onchange='stShowDup=this.checked;stRender()'> 顯示已存在的 ${{dup}} 筆</label>`;
+  const n = v => v == null ? '—' : Math.round(v).toLocaleString();
+  html += `<div class='pb-wrap'><table class='pb-table'><thead><tr>
+    <th style='text-align:left'><input type='checkbox' onchange='document.querySelectorAll("".st-sel"").forEach(c => c.checked = this.checked)'></th><th>日期</th><th>股號 股名</th><th>買賣別</th>
+    <th>股數</th><th>成交價</th><th>手續費</th><th>交易稅</th><th>淨收付</th><th>書號</th><th style='text-align:left'>狀態</th><th style='text-align:left'>備註</th>
+  </tr></thead><tbody>`;
+  for (const it of p.items) {{
+    const isDup = it.status === 'duplicate';
+    if (isDup && !stShowDup) continue;
+    const [label, color] = ST_STATUS[it.status];
+    const code = it.code ? esc(it.code) : `<input class='pb-price st-code' data-row='${{it.index}}' placeholder='股號' style='width:70px;text-align:left'>`;
+    html += `<tr class='${{isDup ? 'dup' : ''}}'>
+      <td>${{isDup ? '' : `<input type='checkbox' class='st-sel' data-row='${{it.index}}' ${{it.status === 'new' ? 'checked' : ''}}>`}}</td>
+      <td>${{it.date}}</td><td>${{code}} ${{esc(it.name)}}</td><td style='text-align:left'>${{it.tradeType}}</td>
+      <td>${{it.shares.toLocaleString()}}</td><td>${{it.price}}</td><td>${{n(it.commission)}}</td><td>${{n(it.tax)}}</td><td>${{n(it.net)}}</td>
+      <td style='text-align:left'>${{esc(it.orderNo) || '—'}}</td>
+      <td style='text-align:left'><span class='pb-badge' style='background:${{color}}'>${{label}}</span></td>
+      <td class='pb-note'>${{esc(it.note)}}</td>
+    </tr>`;
+  }}
+  html += `</tbody></table></div>`;
+  if (p.items.some(i => i.status !== 'duplicate')) {{
+    html += `<div class='pb-bar'>
+      <div class='field'><label>帳戶</label><input id='st-account' list='acList' value='${{esc(acc)}}' placeholder='如: 已質借元大'></div>
+      <button class='btn' id='st-btn' onclick='stImport()'>匯入勾選的交易</button>
+    </div>`;
+  }} else html += `<div class='alert ok'>對帳單上的交易都已登錄，沒有需要匯入的交易。</div>`;
+  document.getElementById('st-result').innerHTML = html;
+}}
+
+function stApplyMapping() {{
+  const mapping = {{}};
+  document.querySelectorAll('.st-map').forEach(s => {{ if (+s.value >= 0) mapping[s.dataset.field] = +s.value; }});
+  stLoad({{ headerRow: stPreview.headerRow, mapping }});
+}}
+
+async function stImport() {{
+  const rows = [...document.querySelectorAll('.st-sel:checked')].map(c => +c.dataset.row);
+  const accountType = document.getElementById('st-account').value.trim();
+  const errBox = msg => document.getElementById('st-result').insertAdjacentHTML('afterbegin', `<div class='alert err'>${{esc(msg)}}</div>`);
+  if (!rows.length) {{ errBox('請勾選要匯入的交易'); return; }}
+  if (!accountType) {{ errBox('請填寫帳戶'); return; }}
+  const codes = {{}};
+  for (const inp of document.querySelectorAll('.st-code')) {{
+    if (!rows.includes(+inp.dataset.row)) continue;
+    if (!inp.value.trim()) {{ errBox('請填寫查不到的股號'); inp.focus(); return; }}
+    codes[inp.dataset.row] = inp.value.trim();
+  }}
+  if (!confirm(`確定匯入 ${{rows.length}} 筆交易到「${{accountType}}」？`)) return;
+  const btn = document.getElementById('st-btn');
+  btn.disabled = true;
+  try {{
+    const res = await fetch('/api/stocks/trade/statement/apply', {{
+      method: 'POST', headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{ table: stTable, headerRow: stPreview.headerRow, mapping: stPreview.mapping, codes, rows, accountType }})
+    }});
+    if (!res.ok) {{ btn.disabled = false; errBox(await errText(res) || '匯入失敗'); return; }}
+    const r = await res.json();
+    // 重新比對：剛匯入的會變成「已存在」
+    await stLoad({{}}, `✓ 已匯入 ${{r.imported}} 筆交易` + (r.skipped ? `，${{r.skipped}} 筆已存在略過` : ''));
+  }} catch (e) {{ btn.disabled = false; errBox('網路錯誤'); }}
+}}
+
+// ── 集保 E 存摺核對 ──────────────────────────────────────────────────────
 // 存摺 PDF 有文字層：pdf.js 抽出文字，依座標組成表格列，再拆成 日期／股號／股名／摘要／數額
 const PDFJS = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
 const PDFJS_WORKER = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 const PB_STATUS = {{
-  'new':       ['新交易', '#080'],
-  'partial':   ['補登差額', '#0066cc'],
-  'suspect':   ['疑似已登錄', '#c60'],
-  'duplicate': ['已存在', '#aaa']
+  'missing': ['系統少登', '#c0392b'],
+  'extra':   ['系統多登', '#c60'],
+  'matched': ['相符', '#aaa']
 }};
-let pbRows = null, pbPreview = null, pbShowDup = false;
+let pbRows = null, pbReport = null, pbShowMatched = false;
 
 function loadScript(src) {{
   return new Promise((ok, fail) => {{
@@ -1127,93 +1296,53 @@ async function pbParse() {{
       out.innerHTML = `<div class='alert err'>讀不到任何交易明細列，請確認是集保 e 存摺匯出的「交易明細」PDF</div>`;
       return;
     }}
-    await pbLoadPreview();
+    await pbCheck();
   }} catch (e) {{
     pbStatus('');
     out.innerHTML = `<div class='alert err'>讀取失敗：${{esc(e.message)}}</div>`;
   }}
 }}
 
-async function pbLoadPreview(doneMsg) {{
-  pbStatus(`共讀到 ${{pbRows.length}} 列明細，比對既有交易並查詢收盤價…`);
-  const res = await fetch('/api/stocks/trade/passbook/preview', {{
+async function pbCheck() {{
+  pbStatus(`共讀到 ${{pbRows.length}} 列明細，比對既有交易…`);
+  const res = await fetch('/api/stocks/trade/passbook/check', {{
     method: 'POST', headers: {{'Content-Type': 'application/json'}},
     body: JSON.stringify({{ rows: pbRows }})
   }});
   if (!res.ok) {{ pbStatus(''); document.getElementById('pb-result').innerHTML = `<div class='alert err'>${{esc(await errText(res) || '比對失敗')}}</div>`; return; }}
-  pbPreview = await res.json();
-  pbStatus(`共讀到 ${{pbRows.length}} 列明細。`);
-  pbRender(doneMsg);
+  pbReport = await res.json();
+  pbStatus(`共讀到 ${{pbRows.length}} 列明細` + (pbReport.from ? `（${{pbReport.from}} ～ ${{pbReport.to}}）` : '') + '。');
+  pbRender();
 }}
 
-function pbRender(doneMsg) {{
-  const p = pbPreview;
+function pbRender() {{
+  const p = pbReport;
   const count = s => p.items.filter(i => i.status === s).length;
-  const dup = count('duplicate');
-  const acc = document.getElementById('pb-account')?.value ?? p.suggestedAccount;
-  let html = doneMsg ? `<div class='alert ok'>${{esc(doneMsg)}}</div>` : '';
-  html += `<p class='pb-hint' style='margin:8px 0'>買賣明細 ${{p.items.length}} 筆：新交易 ${{count('new')}}、補登差額 ${{count('partial')}}、疑似已登錄 ${{count('suspect')}}（預設不勾選，請確認）、已存在 ${{dup}}`;
+  const matched = count('matched');
+  let html = `<p class='pb-hint' style='margin:8px 0'>買賣 ${{p.items.length}} 筆：相符 ${{matched}}、系統少登 ${{count('missing')}}、系統多登 ${{count('extra')}}`;
   if (p.ignored.length) html += `<br>略過非買賣異動：` + p.ignored.map(g => `${{esc(g.memo)}} ${{g.count}} 列`).join('、');
   html += `</p>`;
   for (const w of p.warnings) html += `<div class='alert err'>${{esc(w)}}</div>`;
-  if (dup) html += `<label style='display:inline-flex;gap:6px;align-items:center;font-weight:normal'><input type='checkbox' style='width:auto' ${{pbShowDup ? 'checked' : ''}} onchange='pbShowDup=this.checked;pbRender()'> 顯示已存在的 ${{dup}} 筆</label>`;
-  html += `<div class='pb-wrap'><table class='pb-table'><thead><tr>
-    <th style='text-align:left'><input type='checkbox' id='pb-all' onchange='pbToggleAll(this.checked)'></th><th>日期</th><th>股號 股名</th><th>買賣別</th>
-    <th>存摺股數</th><th>已登錄</th><th>匯入股數</th><th>成交價</th><th style='text-align:left'>狀態</th><th style='text-align:left'>備註</th>
-  </tr></thead><tbody>`;
-  for (const it of p.items) {{
-    const isDup = it.status === 'duplicate';
-    if (isDup && !pbShowDup) continue;
-    const [label, color] = PB_STATUS[it.status];
-    const checked = it.status === 'new' || it.status === 'partial';
-    html += `<tr class='${{isDup ? 'dup' : ''}}'>
-      <td>${{isDup ? '' : `<input type='checkbox' class='pb-sel' data-key='${{esc(it.key)}}' ${{checked ? 'checked' : ''}}>`}}</td>
-      <td>${{it.date}}</td><td>${{esc(it.code)}} ${{esc(it.name)}}</td><td style='text-align:left'>${{it.tradeType}}</td>
-      <td>${{it.passbookShares.toLocaleString()}}</td><td>${{it.existingShares ? it.existingShares.toLocaleString() : '—'}}</td>
-      <td>${{isDup ? '—' : it.importShares.toLocaleString()}}</td>
-      <td>${{isDup ? '—' : `<input type='number' class='pb-price' data-key='${{esc(it.key)}}' step='0.01' min='0' value='${{it.price ?? ''}}' placeholder='${{it.tradeType === '配股' ? '可不填' : '請填寫'}}'>`}}</td>
-      <td style='text-align:left'><span class='pb-badge' style='background:${{color}}'>${{label}}</span></td>
-      <td class='pb-note'>${{esc(it.note)}}</td>
-    </tr>`;
+  if (matched === p.items.length) html += `<div class='alert ok'>存摺上的買賣都已登錄，交易紀錄完整。</div>`;
+  else if (count('missing')) html += `<div class='alert err'>有 ${{count('missing')}} 筆存摺上的交易沒有登錄齊全，請用上方「券商對帳單匯入」補上。</div>`;
+  if (matched) html += `<label style='display:inline-flex;gap:6px;align-items:center;font-weight:normal'><input type='checkbox' style='width:auto' ${{pbShowMatched ? 'checked' : ''}} onchange='pbShowMatched=this.checked;pbRender()'> 顯示相符的 ${{matched}} 筆</label>`;
+  const rows = p.items.filter(i => i.status !== 'matched' || pbShowMatched);
+  if (rows.length) {{
+    html += `<div class='pb-wrap'><table class='pb-table'><thead><tr>
+      <th>日期</th><th>股號 股名</th><th>買賣別</th><th>存摺股數</th><th>系統股數</th><th style='text-align:left'>狀態</th><th style='text-align:left'>說明</th>
+    </tr></thead><tbody>`;
+    for (const it of rows) {{
+      const [label, color] = PB_STATUS[it.status];
+      html += `<tr class='${{it.status === 'matched' ? 'dup' : ''}}'>
+        <td style='text-align:left'>${{it.date}}</td><td style='text-align:left'>${{esc(it.code)}} ${{esc(it.name)}}</td><td style='text-align:left'>${{it.tradeType}}</td>
+        <td>${{it.passbookShares ? it.passbookShares.toLocaleString() : '—'}}</td><td>${{it.systemShares ? it.systemShares.toLocaleString() : '—'}}</td>
+        <td style='text-align:left'><span class='pb-badge' style='background:${{color}}'>${{label}}</span></td>
+        <td class='pb-note'>${{esc(it.note)}}</td>
+      </tr>`;
+    }}
+    html += `</tbody></table></div>`;
   }}
-  html += `</tbody></table></div>`;
-  if (p.items.some(i => i.status !== 'duplicate')) {{
-    html += `<div class='pb-bar'>
-      <div class='field'><label>帳戶</label><input id='pb-account' list='acList' value='${{esc(acc)}}' placeholder='如: 已質借元大'></div>
-      <button class='btn' id='pb-btn' onclick='pbApply()'>匯入勾選的交易</button>
-    </div>`;
-  }} else html += `<div class='alert ok'>存摺上的買賣都已登錄，沒有需要匯入的交易。</div>`;
   document.getElementById('pb-result').innerHTML = html;
-}}
-
-function pbToggleAll(on) {{ document.querySelectorAll('.pb-sel').forEach(c => c.checked = on); }}
-
-async function pbApply() {{
-  const keys = [...document.querySelectorAll('.pb-sel:checked')].map(c => c.dataset.key);
-  const accountType = document.getElementById('pb-account').value.trim();
-  const errBox = msg => document.getElementById('pb-result').insertAdjacentHTML('afterbegin', `<div class='alert err'>${{esc(msg)}}</div>`);
-  if (!keys.length) {{ errBox('請勾選要匯入的交易'); return; }}
-  if (!accountType) {{ errBox('請填寫帳戶'); return; }}
-  const prices = {{}};
-  for (const k of keys) {{
-    const it = pbPreview.items.find(i => i.key === k);
-    const v = parseFloat(document.querySelector(`.pb-price[data-key=""${{CSS.escape(k)}}""]`).value);
-    if (!(v > 0) && !(it.tradeType === '配股' && !(v < 0))) {{ errBox(`${{it.date}} ${{it.code}} ${{it.name}} 請填寫成交價`); return; }}
-    prices[k] = v > 0 ? v : 0;
-  }}
-  if (!confirm(`確定匯入 ${{keys.length}} 筆交易到「${{accountType}}」？`)) return;
-  const btn = document.getElementById('pb-btn');
-  btn.disabled = true;
-  try {{
-    const res = await fetch('/api/stocks/trade/passbook/apply', {{
-      method: 'POST', headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{ rows: pbRows, keys, prices, accountType }})
-    }});
-    if (!res.ok) {{ btn.disabled = false; errBox(await errText(res) || '匯入失敗'); return; }}
-    const r = await res.json();
-    // 重新比對：剛匯入的會變成「已存在」
-    await pbLoadPreview(`✓ 已匯入 ${{r.imported}} 筆交易` + (r.skipped ? `，${{r.skipped}} 筆已存在略過` : ''));
-  }} catch (e) {{ btn.disabled = false; errBox('網路錯誤'); }}
 }}
 
 const stockMap = {{{string.Join(",", knownStocks.Select(s => { var p = s.Split(' ', 2); return $"'{p[0]}':'{(p.Length > 1 ? p[1] : p[0])}'"; }))}}};
