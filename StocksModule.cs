@@ -11,10 +11,10 @@ public static class StocksModule
     static readonly string SnapshotsFile = Path.Combine(DataDir, "stock_snapshots.json");
     static readonly string WatchlistFile = Path.Combine(DataDir, "watchlist.json");
     static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };
-    static readonly SemaphoreSlim Lock = new(1, 1);
+    internal static readonly SemaphoreSlim Lock = new(1, 1);
     const string ExcelFile = @"C:\Users\USER\OneDrive\文件\個人網站\股票總張數統計.xlsx";
     const string ExcelSheet = "交易紀錄";
-    static bool _enableExcel;
+    internal static bool _enableExcel;
 
     public static void MapRoutes(WebApplication app)
     {
@@ -251,14 +251,7 @@ public static class StocksModule
         var trade = BuildTrade(Guid.NewGuid().ToString("N")[..8], req.StockName, req.StockCode, date,
             req.Shares, req.Price, req.TradeType, req.OrderNo ?? "", req.AccountType ?? "");
 
-        if (_enableExcel && File.Exists(ExcelFile))
-        {
-            try { using var fs = File.Open(ExcelFile, FileMode.Open, FileAccess.ReadWrite, FileShare.None); }
-            catch (IOException)
-            {
-                return Results.BadRequest("請先關閉 Excel 檔案「股票總張數統計.xlsx」再新增交易");
-            }
-        }
+        if (ExcelLocked()) return Results.BadRequest("請先關閉 Excel 檔案「股票總張數統計.xlsx」再新增交易");
 
         await Lock.WaitAsync();
         try
@@ -310,8 +303,16 @@ public static class StocksModule
         return Results.Ok(new { message = "交易紀錄已刪除" });
     }
 
+    // Excel 開著時寫不進去，新增交易前先檢查
+    internal static bool ExcelLocked()
+    {
+        if (!_enableExcel || !File.Exists(ExcelFile)) return false;
+        try { using var fs = File.Open(ExcelFile, FileMode.Open, FileAccess.ReadWrite, FileShare.None); return false; }
+        catch (IOException) { return true; }
+    }
+
     // 依買賣別、股數、成交價計算成交金額、手續費、交易稅、淨收付，產生 Trade。
-    static Trade BuildTrade(string id, string stockName, string stockCode, string date,
+    internal static Trade BuildTrade(string id, string stockName, string stockCode, string date,
         long shares, decimal price, string tradeType, string orderNo, string accountType)
     {
         var isEtf = stockCode.StartsWith("00");
@@ -546,7 +547,7 @@ public static class StocksModule
 
     // ── Data helpers ──────────────────────────────────────────────────────
 
-    static List<Trade> LoadTrades()
+    internal static List<Trade> LoadTrades()
     {
         if (!File.Exists(TradesFile)) return [];
         var json = File.ReadAllText(TradesFile);
@@ -563,7 +564,7 @@ public static class StocksModule
         return trades;
     }
 
-    static void SaveTrades(List<Trade> trades) =>
+    internal static void SaveTrades(List<Trade> trades) =>
         File.WriteAllText(TradesFile, JsonSerializer.Serialize(trades, JsonOpts));
 
     static Dictionary<string, Dictionary<int, DivEntry>> LoadDividendsCache()
@@ -676,7 +677,7 @@ public static class StocksModule
         return result;
     }
 
-    static void AppendTradeToExcel(Trade t)
+    internal static void AppendTradeToExcel(Trade t)
     {
         try
         {
@@ -969,6 +970,20 @@ input:focus,select:focus{{outline:none;border-color:#0066cc;box-shadow:0 0 0 2px
 .alert{{padding:10px 14px;border-radius:6px;margin-bottom:16px;font-size:.9rem}}
 .alert.ok{{background:#e6f4ea;color:#1e7e34;border:1px solid #b8dfc0}}
 .alert.err{{background:#fde8e8;color:#c0392b;border:1px solid #f5b8b8}}
+.pb-card{{max-width:960px;margin-top:20px}}
+.pb-card h2{{font-size:1.05rem;margin:0 0 6px}}
+.pb-hint{{font-size:.82rem;color:#777;line-height:1.6;margin:0 0 12px}}
+.pb-wrap{{overflow-x:auto;margin:12px 0}}
+.pb-table{{width:100%;border-collapse:collapse;font-size:.85rem;white-space:nowrap}}
+.pb-table th,.pb-table td{{padding:6px 8px;border-bottom:1px solid #eee}}
+.pb-table input[type=checkbox]{{width:auto}}
+.pb-table input.pb-price{{width:90px;padding:4px 6px;font-size:.85rem;text-align:right}}
+.pb-table tr.dup{{color:#aaa}}
+.pb-badge{{display:inline-block;padding:1px 8px;border-radius:10px;font-size:.75rem;color:#fff}}
+.pb-note{{color:#888;font-size:.78rem;white-space:normal;min-width:180px;text-align:left}}
+.pb-bar{{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap}}
+.pb-bar .field{{margin-bottom:0;min-width:200px}}
+.pb-bar .btn{{width:auto;padding:9px 20px}}
 </style></head><body>
 {NavBar("trade")}
 <h1>💹 新增交易</h1>
@@ -1026,9 +1041,180 @@ input:focus,select:focus{{outline:none;border-color:#0066cc;box-shadow:0 0 0 2px
 </div>
 <button class='btn' onclick='submit()'>確認送出</button>
 </div>
+<div class='form-card pb-card'>
+<h2>📥 集保 E 存摺匯入</h2>
+<p class='pb-hint'>上傳集保 e 存摺「交易明細」PDF，系統會與既有交易紀錄比對（同日、同股號、同買賣別加總股數），只匯入尚未登錄的買進／賣出，已存在的不會重複寫入；擔保品撥轉、存券匯撥等非交易異動會略過。<br>存摺沒有成交價，預設帶入當日收盤價，請依實際成交價修改。</p>
+<input type='file' id='pb-file' accept='application/pdf,.pdf' onchange='pbParse()'>
+<div id='pb-status' class='pb-hint' style='margin-top:8px'></div>
+<div id='pb-result'></div>
+</div>
 <script>
 const today = new Date().toISOString().slice(0,10);
 document.getElementById('date').value = today;
+
+// ── 集保 E 存摺匯入 ──────────────────────────────────────────────────────
+// 存摺 PDF 有文字層：pdf.js 抽出文字，依座標組成表格列，再拆成 日期／股號／股名／摘要／數額
+const PDFJS = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+const PDFJS_WORKER = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+const PB_STATUS = {{
+  'new':       ['新交易', '#080'],
+  'partial':   ['補登差額', '#0066cc'],
+  'suspect':   ['疑似已登錄', '#c60'],
+  'duplicate': ['已存在', '#aaa']
+}};
+let pbRows = null, pbPreview = null, pbShowDup = false;
+
+function loadScript(src) {{
+  return new Promise((ok, fail) => {{
+    if (document.querySelector(`script[src=""${{src}}""]`)) return ok();
+    const s = document.createElement('script');
+    s.src = src; s.onload = ok; s.onerror = () => fail(new Error('無法載入 ' + src));
+    document.head.appendChild(s);
+  }});
+}}
+
+function esc(s) {{ return String(s ?? '').replace(/[&<>""']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','""':'&quot;',""'"":'&#39;'}})[c]); }}
+function pbStatus(t) {{ document.getElementById('pb-status').textContent = t; }}
+// BadRequest(""訊息"") 回傳的是 JSON 字串，去掉引號
+async function errText(res) {{ const t = await res.text(); try {{ return JSON.parse(t); }} catch {{ return t; }} }}
+
+// 回傳每頁的文字行（同一水平線上的字由左到右接起來）；斜向浮水印略過
+async function pdfLines(file) {{
+  await loadScript(PDFJS);
+  pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER;
+  const pdf = await pdfjsLib.getDocument({{ data: await file.arrayBuffer() }}).promise;
+  const lines = [];
+  for (let n = 1; n <= pdf.numPages; n++) {{
+    const content = await (await pdf.getPage(n)).getTextContent();
+    const rows = [];
+    for (const it of content.items) {{
+      const [a, b, c, , x, y] = it.transform;
+      if (!it.str.trim() || Math.abs(b) > 0.01 || Math.abs(c) > 0.01 || a <= 0) continue;
+      let row = rows.find(r => Math.abs(r.y - y) < 2);
+      if (!row) rows.push(row = {{ y, items: [] }});
+      row.items.push({{ x, s: it.str }});
+    }}
+    rows.sort((p, q) => q.y - p.y);
+    for (const r of rows) lines.push(r.items.sort((p, q) => p.x - q.x).map(i => i.s).join(' ').replace(/\s+/g, ' ').trim());
+  }}
+  return lines;
+}}
+
+// 每列：115 10 19 │ 0050 │ 元大台灣50 │ 買進 │ 數額 │ 餘額 [│ 提供人帳號]
+function parsePassbook(lines) {{
+  const re = /^(1\d{{2}})\s*(\d{{2}})\s*(\d{{2}})\s+(\d{{4,6}}[A-Z]?)\s+(.+?)\s+(\S+)\s+([\d,]+)\s+([\d,]+)(\s+\S+)?$/;
+  const rows = [];
+  for (const line of lines) {{
+    const m = line.match(re);
+    if (!m) continue;
+    const date = `${{+m[1] + 1911}}-${{m[2]}}-${{m[3]}}`;
+    rows.push({{ date, code: m[4], name: m[5], memo: m[6], shares: +m[7].replace(/,/g, '') }});
+  }}
+  return rows;
+}}
+
+async function pbParse() {{
+  const file = document.getElementById('pb-file').files[0];
+  const out = document.getElementById('pb-result');
+  out.innerHTML = '';
+  if (!file) return;
+  try {{
+    pbStatus('讀取 PDF…');
+    const lines = await pdfLines(file);
+    pbRows = parsePassbook(lines);
+    if (!pbRows.length) {{
+      pbStatus('');
+      out.innerHTML = `<div class='alert err'>讀不到任何交易明細列，請確認是集保 e 存摺匯出的「交易明細」PDF</div>`;
+      return;
+    }}
+    await pbLoadPreview();
+  }} catch (e) {{
+    pbStatus('');
+    out.innerHTML = `<div class='alert err'>讀取失敗：${{esc(e.message)}}</div>`;
+  }}
+}}
+
+async function pbLoadPreview(doneMsg) {{
+  pbStatus(`共讀到 ${{pbRows.length}} 列明細，比對既有交易並查詢收盤價…`);
+  const res = await fetch('/api/stocks/trade/passbook/preview', {{
+    method: 'POST', headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{ rows: pbRows }})
+  }});
+  if (!res.ok) {{ pbStatus(''); document.getElementById('pb-result').innerHTML = `<div class='alert err'>${{esc(await errText(res) || '比對失敗')}}</div>`; return; }}
+  pbPreview = await res.json();
+  pbStatus(`共讀到 ${{pbRows.length}} 列明細。`);
+  pbRender(doneMsg);
+}}
+
+function pbRender(doneMsg) {{
+  const p = pbPreview;
+  const count = s => p.items.filter(i => i.status === s).length;
+  const dup = count('duplicate');
+  const acc = document.getElementById('pb-account')?.value ?? p.suggestedAccount;
+  let html = doneMsg ? `<div class='alert ok'>${{esc(doneMsg)}}</div>` : '';
+  html += `<p class='pb-hint' style='margin:8px 0'>買賣明細 ${{p.items.length}} 筆：新交易 ${{count('new')}}、補登差額 ${{count('partial')}}、疑似已登錄 ${{count('suspect')}}（預設不勾選，請確認）、已存在 ${{dup}}`;
+  if (p.ignored.length) html += `<br>略過非買賣異動：` + p.ignored.map(g => `${{esc(g.memo)}} ${{g.count}} 列`).join('、');
+  html += `</p>`;
+  for (const w of p.warnings) html += `<div class='alert err'>${{esc(w)}}</div>`;
+  if (dup) html += `<label style='display:inline-flex;gap:6px;align-items:center;font-weight:normal'><input type='checkbox' style='width:auto' ${{pbShowDup ? 'checked' : ''}} onchange='pbShowDup=this.checked;pbRender()'> 顯示已存在的 ${{dup}} 筆</label>`;
+  html += `<div class='pb-wrap'><table class='pb-table'><thead><tr>
+    <th style='text-align:left'><input type='checkbox' id='pb-all' onchange='pbToggleAll(this.checked)'></th><th>日期</th><th>股號 股名</th><th>買賣別</th>
+    <th>存摺股數</th><th>已登錄</th><th>匯入股數</th><th>成交價</th><th style='text-align:left'>狀態</th><th style='text-align:left'>備註</th>
+  </tr></thead><tbody>`;
+  for (const it of p.items) {{
+    const isDup = it.status === 'duplicate';
+    if (isDup && !pbShowDup) continue;
+    const [label, color] = PB_STATUS[it.status];
+    const checked = it.status === 'new' || it.status === 'partial';
+    html += `<tr class='${{isDup ? 'dup' : ''}}'>
+      <td>${{isDup ? '' : `<input type='checkbox' class='pb-sel' data-key='${{esc(it.key)}}' ${{checked ? 'checked' : ''}}>`}}</td>
+      <td>${{it.date}}</td><td>${{esc(it.code)}} ${{esc(it.name)}}</td><td style='text-align:left'>${{it.tradeType}}</td>
+      <td>${{it.passbookShares.toLocaleString()}}</td><td>${{it.existingShares ? it.existingShares.toLocaleString() : '—'}}</td>
+      <td>${{isDup ? '—' : it.importShares.toLocaleString()}}</td>
+      <td>${{isDup ? '—' : `<input type='number' class='pb-price' data-key='${{esc(it.key)}}' step='0.01' min='0' value='${{it.price ?? ''}}' placeholder='${{it.tradeType === '配股' ? '可不填' : '請填寫'}}'>`}}</td>
+      <td style='text-align:left'><span class='pb-badge' style='background:${{color}}'>${{label}}</span></td>
+      <td class='pb-note'>${{esc(it.note)}}</td>
+    </tr>`;
+  }}
+  html += `</tbody></table></div>`;
+  if (p.items.some(i => i.status !== 'duplicate')) {{
+    html += `<div class='pb-bar'>
+      <div class='field'><label>帳戶</label><input id='pb-account' list='acList' value='${{esc(acc)}}' placeholder='如: 已質借元大'></div>
+      <button class='btn' id='pb-btn' onclick='pbApply()'>匯入勾選的交易</button>
+    </div>`;
+  }} else html += `<div class='alert ok'>存摺上的買賣都已登錄，沒有需要匯入的交易。</div>`;
+  document.getElementById('pb-result').innerHTML = html;
+}}
+
+function pbToggleAll(on) {{ document.querySelectorAll('.pb-sel').forEach(c => c.checked = on); }}
+
+async function pbApply() {{
+  const keys = [...document.querySelectorAll('.pb-sel:checked')].map(c => c.dataset.key);
+  const accountType = document.getElementById('pb-account').value.trim();
+  const errBox = msg => document.getElementById('pb-result').insertAdjacentHTML('afterbegin', `<div class='alert err'>${{esc(msg)}}</div>`);
+  if (!keys.length) {{ errBox('請勾選要匯入的交易'); return; }}
+  if (!accountType) {{ errBox('請填寫帳戶'); return; }}
+  const prices = {{}};
+  for (const k of keys) {{
+    const it = pbPreview.items.find(i => i.key === k);
+    const v = parseFloat(document.querySelector(`.pb-price[data-key=""${{CSS.escape(k)}}""]`).value);
+    if (!(v > 0) && !(it.tradeType === '配股' && !(v < 0))) {{ errBox(`${{it.date}} ${{it.code}} ${{it.name}} 請填寫成交價`); return; }}
+    prices[k] = v > 0 ? v : 0;
+  }}
+  if (!confirm(`確定匯入 ${{keys.length}} 筆交易到「${{accountType}}」？`)) return;
+  const btn = document.getElementById('pb-btn');
+  btn.disabled = true;
+  try {{
+    const res = await fetch('/api/stocks/trade/passbook/apply', {{
+      method: 'POST', headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{ rows: pbRows, keys, prices, accountType }})
+    }});
+    if (!res.ok) {{ btn.disabled = false; errBox(await errText(res) || '匯入失敗'); return; }}
+    const r = await res.json();
+    // 重新比對：剛匯入的會變成「已存在」
+    await pbLoadPreview(`✓ 已匯入 ${{r.imported}} 筆交易` + (r.skipped ? `，${{r.skipped}} 筆已存在略過` : ''));
+  }} catch (e) {{ btn.disabled = false; errBox('網路錯誤'); }}
+}}
 
 const stockMap = {{{string.Join(",", knownStocks.Select(s => { var p = s.Split(' ', 2); return $"'{p[0]}':'{(p.Length > 1 ? p[1] : p[0])}'"; }))}}};
 
