@@ -121,11 +121,11 @@ public static class LifeModule
             if (redeemed)
                 actionsHtml = $@"<button class='btn btn-outline' onclick='resetCard(""{c.Id}"")'>↺ 重新開始</button>";
             else if (full)
-                actionsHtml = $@"<button class='btn btn-stamp' disabled>🖐 蓋一個章</button>
+                actionsHtml = $@"<button class='btn btn-stamp' disabled>🖐 蓋章</button>
     <button class='btn btn-outline btn-sm' onclick='unstamp(""{c.Id}"")'>↩ 取消上一個</button>
     <button class='btn btn-reward' onclick='redeem(""{c.Id}"")'>🎁 完成兌換</button>";
             else
-                actionsHtml = $@"<button class='btn btn-stamp' onclick='openStamp(""{c.Id}"")'>🖐 蓋一個章</button>
+                actionsHtml = $@"<button class='btn btn-stamp' onclick='openStamp(""{c.Id}"", {c.Goal - count})'>🖐 蓋章</button>
     <button class='btn btn-outline btn-sm' onclick='unstamp(""{c.Id}"")' {(count == 0 ? "disabled" : "")}>↩ 取消上一個</button>";
 
             var stateClass = redeemed ? " redeemed" : full ? " is-full" : "";
@@ -201,13 +201,27 @@ public static class LifeModule
 .modal-bg{{position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:50}}
 .modal{{background:#fff;border-radius:14px;padding:22px;width:min(92vw,380px);box-shadow:0 8px 30px rgba(0,0,0,.25)}}
 .modal h3{{margin:0 0 14px;color:#5a4a00}}
+.qty{{display:flex;align-items:center;gap:8px}}
+.qty-btn{{width:38px;height:38px;padding:0;font-size:1.2rem;line-height:1}}
+.qty-btn:disabled{{opacity:.4;cursor:not-allowed}}
+#m-qty{{min-width:2ch;text-align:center;font-size:1.3rem;font-weight:700;color:#e8890c;font-variant-numeric:tabular-nums}}
+.qty-hint{{font-size:.8rem;color:#999;margin-top:4px}}
 </style>
 {cardsHtml}
 <div id='msg' style='margin-top:12px'></div>
 
 <div id='stampModal' class='modal-bg' style='display:none'>
   <div class='modal'>
-    <h3>🖐 蓋一個章</h3>
+    <h3>🖐 蓋章</h3>
+    <div class='field'><label>蓋幾個章</label>
+      <div class='qty'>
+        <button type='button' class='btn btn-outline qty-btn' onclick='setQty(qty - 1)'>−</button>
+        <span id='m-qty'>1</span>
+        <button type='button' class='btn btn-outline qty-btn' onclick='setQty(qty + 1)'>＋</button>
+        <button type='button' class='btn btn-outline btn-sm' onclick='setQty(maxQty)'>一次蓋滿</button>
+      </div>
+      <div class='qty-hint' id='m-qty-hint'></div>
+    </div>
     <div class='field'><label>日期</label><input type='date' id='m-date'></div>
     <div class='field'><label>蓋章原因（選填）</label><input id='m-reason' placeholder='例如：自己收玩具、幫忙做家事'></div>
     <div class='actions'>
@@ -217,9 +231,19 @@ public static class LifeModule
   </div>
 </div>
 <script>
-let curCard = null;
-function openStamp(id) {{
+let curCard = null, qty = 1, maxQty = 1;
+function setQty(n) {{
+  qty = Math.max(1, Math.min(maxQty, n));
+  document.getElementById('m-qty').textContent = qty;
+  const [minus, plus] = document.querySelectorAll('.qty-btn');
+  minus.disabled = qty <= 1;
+  plus.disabled = qty >= maxQty;
+}}
+function openStamp(id, remaining) {{
   curCard = id;
+  maxQty = Math.max(1, remaining || 1);
+  document.getElementById('m-qty-hint').textContent = '還差 ' + maxQty + ' 個集滿';
+  setQty(1);
   document.getElementById('m-date').value = new Date().toISOString().slice(0, 10);
   document.getElementById('m-reason').value = '';
   document.getElementById('stampModal').style.display = 'flex';
@@ -230,7 +254,8 @@ async function confirmStamp() {{
   if (!curCard) return;
   const body = {{
     date: document.getElementById('m-date').value,
-    reason: document.getElementById('m-reason').value.trim()
+    reason: document.getElementById('m-reason').value.trim(),
+    count: qty
   }};
   const r = await fetch('/api/life/card/' + curCard + '/stamp', {{
     method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify(body)
@@ -397,10 +422,14 @@ function showMsg(m, t) {{ document.getElementById('msg').innerHTML = `<div class
         var cards = LoadCards();
         var idx = cards.FindIndex(c => c.Id == id);
         if (idx < 0) return Results.NotFound();
-        if (cards[idx].Entries.Count >= cards[idx].Goal) return Results.Ok();
+        var remaining = cards[idx].Goal - cards[idx].Entries.Count;
+        if (remaining <= 0) return Results.Ok();
 
+        // 一次蓋多個：每個章各記一筆（同日期、同原因），最多蓋到集滿
+        var n = Math.Clamp(req.Count ?? 1, 1, remaining);
         var date = string.IsNullOrWhiteSpace(req.Date) ? DateTime.Today.ToString("yyyy-MM-dd") : req.Date.Trim();
-        var entries = new List<StampEntry>(cards[idx].Entries) { new(date, req.Reason?.Trim() ?? "") };
+        var entries = new List<StampEntry>(cards[idx].Entries);
+        entries.AddRange(Enumerable.Repeat(new StampEntry(date, req.Reason?.Trim() ?? ""), n));
         cards[idx] = cards[idx] with { Entries = entries };
         SaveCards(cards);
         return Results.Ok();
@@ -494,4 +523,4 @@ public record RewardCard(
 public record RewardCardRequest(
     string? ChildName, string? Stamp, int Goal, string? Reward);
 
-public record StampRequest(string? Date, string? Reason);
+public record StampRequest(string? Date, string? Reason, int? Count);
