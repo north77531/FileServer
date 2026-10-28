@@ -76,6 +76,7 @@ public static class PledgeModule
     <div class='field'><label>對帳單 PDF／截圖（可多選）</label><input type='file' id='imp-file' accept='application/pdf,image/*' multiple style='width:280px'></div>
     <button class='btn btn-sm' id='imp-btn' onclick='parseStatement()'>開始辨識</button>
     <span id='imp-status' style='font-size:.85rem;color:#888'></span>
+    <a href='#' onclick='clearPdfPasswords();return false' style='font-size:.8rem;color:#888;margin-left:auto'>清除記住的 PDF 密碼</a>
   </div>
   <div id='imp-raw'></div>
   <div id='imp-result'></div>
@@ -458,6 +459,7 @@ function esc(s) {{ return String(s ?? '').replace(/[&<>""']/g, c => ({{'&':'&amp
 
 // 對帳單是「Microsoft Print to PDF」轉印檔，字已成圖形，所以在瀏覽器內 OCR：
 // PDF 以 pdf.js 放大 4 倍繪成圖、截圖直接使用 → tesseract.js 辨識 → 依數字排列規則拆成各欄
+{SharedLayout.PdfPasswordJs}
 const PDFJS = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
 const PDFJS_WORKER = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 const TESSERACT = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
@@ -479,7 +481,7 @@ async function fileToCanvases(file) {{
   if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '')) {{
     await loadScript(PDFJS);
     pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER;
-    const pdf = await pdfjsLib.getDocument({{ data: await file.arrayBuffer() }}).promise;
+    const pdf = await openPdfDocument(await file.arrayBuffer(), file.name);
     const pages = [];
     for (let n = 1; n <= pdf.numPages; n++) {{
       const page = await pdf.getPage(n);

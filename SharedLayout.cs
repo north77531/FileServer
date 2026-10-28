@@ -510,6 +510,55 @@ function downloadCsv(filename, headers, rows) {
 }
 ";
 
+    // 有密碼的對帳單 PDF：先依序試記住的密碼，都打不開才跳窗詢問；輸入正確的密碼記在這台瀏覽器的 localStorage，
+    // 不會送到伺服器。呼叫前須已載入 pdf.js。用法：const pdf = await openPdfDocument(await file.arrayBuffer(), file.name);
+    public static string PdfPasswordJs => @"
+const PDF_PW_KEY = 'pdfPasswords';
+function savedPdfPasswords() { try { return JSON.parse(localStorage.getItem(PDF_PW_KEY) || '[]'); } catch (e) { return []; } }
+function rememberPdfPassword(pw) {
+  const list = [pw, ...savedPdfPasswords().filter(p => p !== pw)].slice(0, 10);
+  try { localStorage.setItem(PDF_PW_KEY, JSON.stringify(list)); } catch (e) {}
+}
+function clearPdfPasswords() {
+  const n = savedPdfPasswords().length;
+  try { localStorage.removeItem(PDF_PW_KEY); } catch (e) {}
+  alert(n ? `已清除 ${n} 組記住的 PDF 密碼` : '沒有記住的 PDF 密碼');
+}
+function askPdfPassword(msg) {
+  return new Promise(ok => {
+    const d = document.createElement('dialog');
+    d.style.cssText = 'border:1px solid #ccc;border-radius:8px;padding:16px;max-width:90vw';
+    d.innerHTML = `<form method='dialog'><p style='margin:0 0 10px'></p>
+      <div style='display:flex;gap:6px;align-items:center'>
+      <input type='password' autocomplete='off' style='width:220px;margin:0'>
+      <button class='btn btn-sm' value='ok' style='width:auto;margin:0'>確定</button>
+      <button class='btn btn-sm' value='cancel' formnovalidate style='width:auto;margin:0;background:#888'>取消</button></div>
+      <p style='margin:10px 0 0;font-size:.8rem;color:#888'>密碼只記在這台瀏覽器，下次自動套用</p></form>`;
+    d.querySelector('p').textContent = msg;
+    document.body.appendChild(d);
+    d.addEventListener('close', () => { const v = d.returnValue === 'ok' ? d.querySelector('input').value : null; d.remove(); ok(v); });
+    d.showModal();
+  });
+}
+async function openPdfDocument(data, name) {
+  const saved = savedPdfPasswords();
+  let i = 0, typed = null, cancel;
+  const cancelled = new Promise((_, rej) => cancel = rej);
+  const task = pdfjsLib.getDocument({ data });
+  task.promise.catch(() => {}); // 取消時由 cancelled 回報，避免未處理的 rejection
+  task.onPassword = async (update, reason) => {
+    if (i < saved.length) return update(saved[i++]);
+    const wrong = typed !== null && reason === pdfjsLib.PasswordResponses.INCORRECT_PASSWORD;
+    const pw = await askPdfPassword((wrong ? '密碼錯誤，請再輸入一次。' : '') + `「${name}」有密碼保護，請輸入開啟密碼：`);
+    if (pw === null) { cancel(new Error('未輸入 PDF 密碼，已取消')); task.destroy(); return; }
+    typed = pw; update(pw);
+  };
+  const pdf = await Promise.race([task.promise, cancelled]);
+  if (typed !== null) rememberPdfPassword(typed);
+  return pdf;
+}
+";
+
     // 讓使用者自選表格要顯示的欄位並可拖拉調整順序（設定存於瀏覽器 localStorage，逐表獨立）。
     // 使用方式：在資料填入表格後、initTable 之前呼叫 setupColumns(tableId, storageKey, {labels})。
     public static string ColumnChooserJs => @"

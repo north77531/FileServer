@@ -1052,6 +1052,7 @@ input:focus,select:focus{{outline:none;border-color:#0066cc;box-shadow:0 0 0 2px
 <h2>🔍 集保 E 存摺核對</h2>
 <p class='pb-hint'>上傳集保 e 存摺「交易明細」PDF，檢查存摺上的買進／賣出是否都已登錄（同日、同股號、同買賣別加總股數比對）。這裡只核對、不寫入；缺少的交易請用上方的券商對帳單匯入補上。擔保品撥轉、存券匯撥等非交易異動會略過。</p>
 <input type='file' id='pb-file' accept='application/pdf,.pdf' onchange='pbParse()'>
+<a href='#' onclick='clearPdfPasswords();return false' style='font-size:.8rem;color:#888;margin-left:8px'>清除記住的 PDF 密碼</a>
 <div id='pb-status' class='pb-hint' style='margin-top:8px'></div>
 <div id='pb-result'></div>
 </div>
@@ -1224,6 +1225,7 @@ async function stImport() {{
 
 // ── 集保 E 存摺核對 ──────────────────────────────────────────────────────
 // 存摺 PDF 有文字層：pdf.js 抽出文字，依座標組成表格列，再拆成 日期／股號／股名／摘要／數額
+{SharedLayout.PdfPasswordJs}
 const PDFJS = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
 const PDFJS_WORKER = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 const PB_STATUS = {{
@@ -1251,7 +1253,7 @@ async function errText(res) {{ const t = await res.text(); try {{ return JSON.pa
 async function pdfLines(file) {{
   await loadScript(PDFJS);
   pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER;
-  const pdf = await pdfjsLib.getDocument({{ data: await file.arrayBuffer() }}).promise;
+  const pdf = await openPdfDocument(await file.arrayBuffer(), file.name);
   const lines = [];
   for (let n = 1; n <= pdf.numPages; n++) {{
     const content = await (await pdf.getPage(n)).getTextContent();
