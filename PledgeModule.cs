@@ -735,6 +735,16 @@ function onRawEdit(el) {{
   previewTimer = setTimeout(refreshImportPreview, 400);
 }}
 
+// 預覽推測股號辨識錯誤時，一鍵改正辨識結果並重新比對
+function fixStockCode(seq, code) {{
+  const r = importStatement.rows.find(x => x.seq === seq);
+  if (!r) return;
+  r.stockCode = code;
+  importProblems = importProblems.filter(p => !p.startsWith(`序號 ${{seq}} `));
+  renderRawRows();
+  refreshImportPreview();
+}}
+
 async function refreshImportPreview() {{
   const r = await fetch('/api/stocks/pledge/statement/preview', {{
     method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify(importStatement)
@@ -781,10 +791,11 @@ function renderImportPreview(pv) {{
     const isChange = i.action !== 'unchanged';
     const note = [i.closedDate ? i.closedDate + ' 結清' : '', i.note].filter(Boolean).join(' ');
     html += `<tr style='${{isChange ? '' : 'color:#aaa'}}'>
-      <td>${{isChange ? `<input type='checkbox' class='imp-chk' value='${{i.seq}}' checked>` : ''}}</td>
+      <td>${{isChange ? `<input type='checkbox' class='imp-chk' value='${{i.seq}}' ${{i.suspect ? '' : 'checked'}}>` : ''}}</td>
       <td>${{i.seq}}</td>
       <td><span style='color:${{color}};font-weight:600'>${{label}}</span></td>
-      <td>${{esc(i.stockCode)}} ${{esc(i.stockName)}}</td>
+      <td style='white-space:nowrap'>${{i.suspect ? `<span style='color:#c0392b;font-weight:600' title='股號可能辨識錯誤，預設不勾選'>⚠️ ${{esc(i.stockCode)}}</span>` : esc(i.stockCode)}} ${{esc(i.stockName)}}
+        ${{i.suggestCode ? `<button class='btn btn-sm btn-outline' style='width:auto;margin:0 0 0 6px;padding:1px 8px' onclick='fixStockCode(${{i.seq}},""${{esc(i.suggestCode)}}"")'>改成 ${{esc(i.suggestCode)}}</button>` : ''}}</td>
       <td>${{esc(i.loanDate)}}</td>
       ${{diffCell(i.sharesBefore, i.sharesAfter)}}
       ${{diffCell(i.principalBefore, i.principalAfter)}}

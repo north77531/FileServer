@@ -10,14 +10,14 @@ public static class PledgeStatementImport
 
     public static void MapRoutes(WebApplication app)
     {
-        app.MapPost("/api/stocks/pledge/statement/preview", (Statement s) => Results.Json(BuildPreview(s), WebJson));
+        app.MapPost("/api/stocks/pledge/statement/preview", async (Statement s, IHttpClientFactory httpFactory) =>
+            Results.Json(BuildPreview(s, PledgeModule.LoadPledges(), await BrokerStatementImport.StockNamesByCode(httpFactory)), WebJson));
         app.MapPost("/api/stocks/pledge/statement/apply", Apply);
     }
     // ── 1. Statement → 預覽（比對現有質借）────────────────────────────────
 
-    static Preview BuildPreview(Statement s) => BuildPreview(s, PledgeModule.LoadPledges());
-
-    static Preview BuildPreview(Statement s, List<PledgeLoan> pledges)
+    // names：上市櫃清單（股號 → 股名），用來補股名並抓出辨識錯的股號；抓不到清單時為空，略過該檢查
+    static Preview BuildPreview(Statement s, List<PledgeLoan> pledges, Dictionary<string, string> names)
     {
         var warnings = CheckTotals(s);
         var statementDate = RocToIso(s.StatementDate);
@@ -52,11 +52,37 @@ public static class PledgeStatementImport
                 action = same ? "unchanged" : repaid ? "close" : "update";
             }
 
-            items.Add(new PlanItem(r.Seq, action, p?.Id, r.StockCode, p?.StockName ?? r.StockName, loanDate ?? r.LoanDate,
+            var listedName = names.GetValueOrDefault(r.StockCode);
+            var unlisted = names.Count > 0 && listedName == null;
+            if (unlisted) warnings.Add($"序號 {r.Seq} 股號 {r.StockCode} 不在上市櫃清單，可能辨識錯誤");
+            var stockName = !string.IsNullOrEmpty(p?.StockName) ? p.StockName : listedName ?? r.StockName;
+
+            items.Add(new PlanItem(r.Seq, action, p?.Id, r.StockCode, stockName, loanDate ?? r.LoanDate,
                 p?.Shares, sharesAfter,
                 p?.Principal, repaid ? 0 : r.Balance,
                 p == null ? null : Math.Round(PledgeModule.TotalInterest(p, asOf)), interestAfter,
-                closedDate, repaid ? $"{r.RepayMethod} {r.RepaidPrincipal:N0} 元" : ""));
+                closedDate, repaid ? $"{r.RepayMethod} {r.RepaidPrincipal:N0} 元" : "", Suspect: unlisted));
+        }
+
+        // 股號辨識錯一位數（如 2892 → 2802）時對不到現有質借、會被當成新借款：
+        // 找借款日相同、且股號只差一位數或原始借款金額相同、尚未被對應的質借，提示並提供一鍵改正
+        var rowsBySeq = s.Rows.ToDictionary(r => r.Seq);
+        for (var k = 0; k < items.Count; k++)
+        {
+            var it = items[k];
+            if (it.PledgeId != null || it.LoanDate.Length != 10) continue;
+            var r = rowsBySeq[it.Seq];
+            var original = r.Balance + r.RepaidPrincipal;
+            var guess = pledges
+                .Where(p => !matched.Contains(p.Id) && p.StockCode != it.StockCode && PledgeLoanDate(p) == it.LoanDate)
+                .Select(p => (p, oneDigit: OneDigitOff(p.StockCode, it.StockCode), sameAmount: OriginalPrincipal(p) == original))
+                .Where(x => x.oneDigit || x.sameAmount)
+                .OrderByDescending(x => x.oneDigit && x.sameAmount).ThenByDescending(x => x.oneDigit)
+                .FirstOrDefault();
+            if (guess.p == null) continue;
+            var why = string.Join("、", new[] { "借款日相同", guess.oneDigit ? "股號只差一位數" : "", guess.sameAmount ? "借款金額相同" : "" }.Where(w => w != ""));
+            warnings.Add($"序號 {it.Seq} 股號 {it.StockCode} 對不到現有質借，但 {guess.p.StockCode} {guess.p.StockName}（{why}），可能是辨識錯誤");
+            items[k] = it with { Suspect = true, SuggestCode = guess.p.StockCode };
         }
 
         var orphans = pledges.Where(p => p.ClosedDate == null && !matched.Contains(p.Id))
@@ -80,6 +106,9 @@ public static class PledgeStatementImport
             .FirstOrDefault();
         return byDate ?? pool.FirstOrDefault(p => p.ClosedDate == null && r.Balance > 0 && p.Principal == r.Balance && p.Shares == r.Shares);
     }
+
+    static bool OneDigitOff(string a, string b) =>
+        a.Length == b.Length && a.Zip(b).Count(x => x.First != x.Second) == 1;
 
     static string PledgeLoanDate(PledgeLoan p) =>
         p.LoanDate ?? p.Events?.FirstOrDefault()?.Date ?? p.InterestSince;
@@ -120,10 +149,10 @@ public static class PledgeStatementImport
 
     // ── 2. 套用勾選的項目 ─────────────────────────────────────────────────
 
-    static IResult Apply(ApplyRequest req)
+    static async Task<IResult> Apply(ApplyRequest req, IHttpClientFactory httpFactory)
     {
         var pledges = PledgeModule.LoadPledges();
-        var preview = BuildPreview(req.Statement, pledges);
+        var preview = BuildPreview(req.Statement, pledges, await BrokerStatementImport.StockNamesByCode(httpFactory));
         if (preview.StatementDate == null) return Results.BadRequest("讀不到對帳日，無法套用");
         var statementDate = preview.StatementDate;
         var label = $"元大對帳單 {statementDate[..7]}";
@@ -198,7 +227,9 @@ public record StatementTotals(
 public record PlanItem(
     int Seq, string Action, string? PledgeId, string StockCode, string StockName, string LoanDate,
     int? SharesBefore, int SharesAfter, decimal? PrincipalBefore, decimal PrincipalAfter,
-    decimal? InterestBefore, decimal InterestAfter, string? ClosedDate, string Note);
+    decimal? InterestBefore, decimal InterestAfter, string? ClosedDate, string Note,
+    // Suspect：股號可能辨識錯（預設不勾選）；SuggestCode：推測的正確股號
+    bool Suspect = false, string? SuggestCode = null);
 
 // 系統中未結清、但對帳單上找不到的質借（可能屬於其他機構），只提示不處理
 public record Orphan(string Id, string StockCode, string StockName, int Shares, decimal Principal, string LoanDate, string CustodyAccount);

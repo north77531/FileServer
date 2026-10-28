@@ -189,6 +189,14 @@ public static class BrokerStatementImport
         return list;
     }
 
+    // 股號 → 股名（由同一份上市櫃清單反查）；清單抓不到時回傳空字典
+    public static async Task<Dictionary<string, string>> StockNamesByCode(IHttpClientFactory httpFactory)
+    {
+        var byCode = new Dictionary<string, string>();
+        foreach (var (name, code) in await StockList(httpFactory)) byCode.TryAdd(code, name);
+        return byCode;
+    }
+
     // ── 3. 預覽（比對現有交易）────────────────────────────────────────────
 
     static async Task<IResult> Preview(BrokerStatementRequest req, IHttpClientFactory httpFactory)
