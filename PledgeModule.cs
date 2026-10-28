@@ -28,10 +28,11 @@ public static class PledgeModule
 
         var rows = pledges.Count == 0 ? "" : string.Join("", pledges.Select(p =>
         {
-            var closedTag = p.ClosedDate != null ? $"<span class='tag' style='background:#eee;color:#888;margin-left:4px'>已結清 {p.ClosedDate}</span>" : "";
+            // 已結清的列在起息(結算)日欄顯示結清日，不另佔股票欄寬度
+            var sinceCell = p.ClosedDate != null ? $"<span class='tag' style='background:#eee;color:#888'>結清 {p.ClosedDate}</span>" : p.InterestSince;
             return $@"
 <tr id='row-{p.Id}' class='{(p.ClosedDate != null ? "closed-row" : "")}'>
-  <td>{System.Net.WebUtility.HtmlEncode(p.StockCode)} <span style='color:#666'>{System.Net.WebUtility.HtmlEncode(p.StockName)}</span>{closedTag}</td>
+  <td>{System.Net.WebUtility.HtmlEncode(p.StockCode)} <span style='color:#666'>{System.Net.WebUtility.HtmlEncode(p.StockName)}</span></td>
   <td class='num'>{p.Shares:N0}</td>
   <td class='num' id='price-{p.Id}'><span class='loading'>—</span></td>
   <td class='num' id='mv-{p.Id}'>—</td>
@@ -41,18 +42,9 @@ public static class PledgeModule
   <td class='num' id='interest-{p.Id}'>—</td>
   <td class='num' id='owed-{p.Id}'>—</td>
   <td class='num' id='mr-{p.Id}'>—</td>
-  <td>{p.InterestSince}</td>
+  <td>{sinceCell}</td>
   <td>{System.Net.WebUtility.HtmlEncode(p.CustodyAccount)}</td>
-  <td>
-    <div class='actions'>
-      <button class='btn btn-sm btn-outline' onclick=""togglePanel('{p.Id}','edit')"">編輯</button>
-      <button class='btn btn-sm btn-outline' onclick=""togglePanel('{p.Id}','rate')"" {(p.ClosedDate != null ? "disabled" : "")}>改利率</button>
-      <button class='btn btn-sm btn-outline' onclick=""togglePanel('{p.Id}','sell')"" {(p.ClosedDate != null ? "disabled" : "")}>賣出還款</button>
-      <button class='btn btn-sm btn-outline' onclick=""togglePanel('{p.Id}','cash')"" {(p.ClosedDate != null ? "disabled" : "")}>現金還款</button>
-      <button class='btn btn-sm btn-outline' onclick=""togglePanel('{p.Id}','hist')"">歷史</button>
-      <button class='btn btn-sm btn-danger' onclick='delPledge(""{p.Id}"")'>刪除</button>
-    </div>
-  </td>
+  <td><button class='btn btn-sm btn-outline act-btn' onclick=""openActMenu(event,'{p.Id}')"">操作 ▾</button></td>
 </tr>
 <tr id='panel-{p.Id}' style='display:none' data-nofilter='1'>
   <td colspan='13' style='background:#fafbfe;border-bottom:2px solid #dde4f5;padding:0'>
@@ -132,6 +124,13 @@ th.num,td.num{{text-align:right}}
 .mr-warn{{color:#d80;font-weight:700}}
 .mr-danger{{color:#c00;font-weight:700}}
 .closed-row{{opacity:.55}}
+#pledge-table>tbody>tr:not([data-nofilter])>td{{white-space:nowrap;padding-top:6px;padding-bottom:6px}}
+.act-btn{{width:auto;margin:0;padding:3px 10px}}
+.act-menu{{position:absolute;z-index:50;background:#fff;border:1px solid #d5dbe8;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.12);padding:4px 0;min-width:120px}}
+.act-menu button{{display:block;width:100%;margin:0;padding:7px 14px;border:0;background:none;text-align:left;font-size:.88rem;color:#333;cursor:pointer;border-radius:0}}
+.act-menu button:hover:not(:disabled){{background:#f0f4ff}}
+.act-menu button:disabled{{color:#bbb;cursor:default}}
+.act-menu button.danger{{color:#c0392b}}
 .mini-field{{margin-bottom:0}}
 .mini-row{{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px}}
 .mini-row .field{{margin:0}}
@@ -433,6 +432,38 @@ function histView(p) {{
   html += '</tbody></table>';
   return html;
 }}
+
+// 每列只放一個「操作」按鈕，點開後才列出各動作，避免一排按鈕把列撐高
+function closeActMenu() {{ document.querySelector('.act-menu')?.remove(); }}
+function openActMenu(ev, id) {{
+  ev.stopPropagation();
+  const wasOpen = document.querySelector('.act-menu')?.dataset.id === id;
+  closeActMenu();
+  if (wasOpen) return;
+  const closed = !!pledges.find(p => p.id === id)?.closedDate;
+  const items = [
+    ['編輯', () => togglePanel(id, 'edit')],
+    ['改利率', () => togglePanel(id, 'rate'), closed],
+    ['賣出還款', () => togglePanel(id, 'sell'), closed],
+    ['現金還款', () => togglePanel(id, 'cash'), closed],
+    ['歷史', () => togglePanel(id, 'hist')],
+    ['刪除', () => delPledge(id), false, 'danger'],
+  ];
+  const m = document.createElement('div');
+  m.className = 'act-menu'; m.dataset.id = id;
+  for (const [label, fn, disabled, cls] of items) {{
+    const b = document.createElement('button');
+    b.textContent = label; b.disabled = !!disabled; if (cls) b.className = cls;
+    b.onclick = () => {{ closeActMenu(); fn(); }};
+    m.appendChild(b);
+  }}
+  document.body.appendChild(m);
+  const r = ev.currentTarget.getBoundingClientRect();
+  m.style.top = (window.scrollY + r.bottom + 4) + 'px';
+  m.style.left = (window.scrollX + Math.max(8, r.right - m.offsetWidth)) + 'px';
+}}
+document.addEventListener('click', closeActMenu);
+window.addEventListener('resize', closeActMenu);
 
 async function delPledge(id) {{
   if (!confirm('確定刪除此質借紀錄？此動作無法復原。')) return;
