@@ -179,6 +179,7 @@ public static class WorkLogModule
   <h1 style='margin:0;flex:1'>📝 工作紀錄</h1>
   <button class='btn btn-sm btn-outline' onclick='exportFullLog(this)'>⬇ 下載Excel</button>
   <button class='btn btn-sm btn-outline' onclick='exportFullLogCsv()'>⬇ 下載CSV</button>
+  <button class='btn btn-sm btn-outline' onclick='exportMonthlyReport(this)'>⬇ 匯出月報</button>
   <a href='/work/log/add' class='btn'>＋ 新增紀錄</a>
 </div>
 <div class='cards'>
@@ -242,6 +243,44 @@ async function exportFullLog(btn) {{
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = '工作紀錄.xlsx';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }} finally {{
+    btn.textContent = oldText; btn.disabled = false;
+  }}
+}}
+// ── 月報：指定月份、排除 Operation Tickets，只輸出月報需要的欄位 ──
+function hoursBucket(min) {{
+  return '<' + Math.max(1, Math.ceil((Number(min) || 0) / 60)) + '小時';
+}}
+async function exportMonthlyReport(btn) {{
+  const fy = document.getElementById('filterYear').value;
+  const fm = document.getElementById('filterMonth').value;
+  const def = fy && fm ? fy + '-' + fm.padStart(2, '0') : todayStr().slice(0, 7);
+  const ym = (prompt('匯出月份 (YYYY-MM)', def) || '').trim();
+  if (!ym) return;
+  if (!/^\d{{4}}-\d{{2}}$/.test(ym)) {{ alert('月份格式需為 YYYY-MM'); return; }}
+  const rows = Object.values(fullLogsData)
+    .filter(l => (l.planStartDate || '').startsWith(ym + '-'))
+    .filter(l => (l.summary || '').trim().toLowerCase() !== 'operation tickets')
+    .sort((a, b) => a.planStartDate.localeCompare(b.planStartDate))
+    .map(l => [l.description, l.requestIssuer, l.itpm, l.planStartDate, 'Finished', 'Normal', hoursBucket(l.minutes)]);
+  if (rows.length === 0) {{ alert(ym + ' 沒有可匯出的紀錄'); return; }}
+  const oldText = btn.textContent;
+  btn.textContent = '匯出中...'; btn.disabled = true;
+  try {{
+    const fileName = '工作月報_' + ym;
+    const res = await fetch('/api/export/excel', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ fileName, sheetName: ym,
+        headers: ['Description', 'Request Issuer', 'ITPM', '日期', 'Status', 'Priority', '耗時'], rows }})
+    }});
+    if (!res.ok) {{ alert('匯出失敗'); return; }}
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = fileName + '.xlsx';
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
   }} finally {{
