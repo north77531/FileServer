@@ -37,6 +37,7 @@ HouseModule.MapRoutes(app);
 CarModule.MapRoutes(app);
 WorkLogModule.MapRoutes(app);
 LifeModule.MapRoutes(app);
+SubscriptionModule.MapRoutes(app);
 TakachihoModule.MapRoutes(app);
 ExportModule.MapRoutes(app);
 StampCardModule.MapRoutes(app);
