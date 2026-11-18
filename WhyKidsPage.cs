@@ -341,7 +341,8 @@ async function ask(question){
 // ---------------- 語音辨識（按住說話） ----------------
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const mic = $("mic");
-let rec = null, recText = "", holding = false;
+// 每按一次都是全新的一輪：先把上一輪（不管卡在哪）清乾淨，iPhone 才不會只能問一次
+let rec = null, recText = "", lastErr = "", holding = false, listening = false, endTimer = null;
 
 if (!SR) {
   mic.hidden = true;
@@ -349,45 +350,75 @@ if (!SR) {
   hint.textContent = "這個瀏覽器不支援語音辨識，請用打字或點上面的題目";
 }
 
+function dropRec(){
+  if (!rec) return;
+  const r = rec; rec = null;
+  r.onresult = r.onerror = r.onend = null;
+  try { r.abort(); } catch {}
+}
+
+function finishListen(){
+  if (!listening) return;
+  listening = false; holding = false;
+  clearTimeout(endTimer);
+  dropRec();
+  mic.classList.remove("on"); $("micLabel").textContent = "按住說話";
+  const q = recText.trim();
+  if (q) { ask(q); return; }
+  setState("idle");
+  if (lastErr === "not-allowed" || lastErr === "service-not-allowed")
+    hint.textContent = "請允許麥克風與語音辨識：設定 → App → Safari → 麥克風；並開啟 設定 → 一般 → 鍵盤 → 聽寫";
+  else if (lastErr && lastErr !== "no-speech" && lastErr !== "aborted")
+    hint.textContent = "語音辨識出了點問題（" + lastErr + "），再按一次試試看";
+  const s = "我沒有聽清楚，再按住按鈕說一次好嗎？";
+  bubble.textContent = s; speak(s);
+}
+
 function startListen(e){
   e.preventDefault();
-  if (!SR || holding) return;
-  holding = true;
+  if (!SR) return;
+  try { mic.setPointerCapture(e.pointerId); } catch {}
+  clearTimeout(endTimer);
+  dropRec();
   if (aborter) aborter.abort();
   stopSpeaking();
-  recText = "";
-  heard.textContent = "";
+  holding = true; listening = true;
+  recText = ""; lastErr = "";
+  heard.textContent = ""; hint.textContent = "";
   mic.classList.add("on"); $("micLabel").textContent = "我在聽…";
   setState("listening");
-  rec = new SR();
-  rec.lang = "zh-TW"; rec.interimResults = true; rec.continuous = true; rec.maxAlternatives = 1;
-  rec.onresult = ev => {
+
+  const r = new SR(); rec = r;
+  r.lang = "zh-TW"; r.interimResults = true; r.continuous = true; r.maxAlternatives = 1;
+  r.onresult = ev => {
     let s = "";
     for (let i = 0; i < ev.results.length; i++) s += ev.results[i][0].transcript;
     recText = s; heard.textContent = s;
   };
-  rec.onerror = ev => {
-    if (ev.error === "not-allowed" || ev.error === "service-not-allowed")
-      hint.textContent = "請允許使用麥克風與語音辨識（設定 → Safari → 麥克風）";
+  r.onerror = ev => { lastErr = ev.error || "error"; };
+  r.onend = () => {
+    if (rec !== r) return;
+    rec = null;
+    if (!holding) finishListen();   // 還按著時 iPhone 自己先停了：等放開再送出
   };
-  rec.onend = () => {
-    mic.classList.remove("on"); $("micLabel").textContent = "按住說話";
-    const q = recText.trim(); rec = null;
-    if (holding) holding = false;
-    if (q) ask(q);
-    else { setState("idle"); const s = "我沒有聽清楚，再按住按鈕說一次好嗎？"; bubble.textContent = s; speak(s); }
-  };
-  try { rec.start(); } catch { holding = false; }
+  try { r.start(); } catch (err) { lastErr = "start"; rec = null; }
 }
+
 function stopListen(e){
   if (e) e.preventDefault();
   if (!holding) return;
   holding = false;
-  if (rec) setTimeout(() => rec && rec.stop(), 350); // 放開後稍等一下，最後一個字才不會被切掉
+  if (!rec) { finishListen(); return; }
+  const r = rec;
+  // 放開後稍等一下，最後一個字才不會被切掉
+  setTimeout(() => { if (rec === r) { try { r.stop(); } catch { finishListen(); } } }, 350);
+  // 保險：iPhone 有時 stop 之後不會通知結束，2.5 秒後強制收尾
+  endTimer = setTimeout(finishListen, 2500);
 }
 mic.addEventListener("pointerdown", startListen);
 mic.addEventListener("pointerup", stopListen);
 mic.addEventListener("pointercancel", stopListen);
+mic.addEventListener("lostpointercapture", stopListen);
 mic.addEventListener("contextmenu", e => e.preventDefault());
 
 // ---------------- 畫面切換 ----------------
