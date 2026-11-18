@@ -41,6 +41,7 @@ SubscriptionModule.MapRoutes(app);
 TakachihoModule.MapRoutes(app);
 ExportModule.MapRoutes(app);
 StampCardModule.MapRoutes(app);
+WhyKidsModule.MapRoutes(app);
 
 // 首頁 → 導向股票庫存
 app.MapGet("/", ctx =>
