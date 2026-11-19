@@ -407,6 +407,9 @@ public static class StocksModule
         return Results.Json(holdings);
     }
 
+    // 目前庫存（張），供質借頁計算未質借張數
+    internal static List<(string Code, string Name, int Shares, long Cost)> CurrentHoldings() => AggregateHoldings(LoadTrades());
+
     // 依交易紀錄回推指定日期當下、各檔股票的持有張數與成本
     static List<(string Code, string Name, int Shares, long Cost)> ComputeHoldingsAsOf(string cutoffDate) =>
         AggregateHoldings(LoadTrades().Where(t => string.Compare(t.Date, cutoffDate, StringComparison.Ordinal) <= 0));
