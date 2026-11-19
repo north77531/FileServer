@@ -17,6 +17,89 @@ public static class PledgeModule
         app.MapPost("/api/stocks/pledge/{id}/rate", ChangeRate);
         app.MapPost("/api/stocks/pledge/{id}/repay", Repay);
         app.MapDelete("/api/stocks/pledge/{id}", DeletePledge);
+        app.MapGet("/api/stocks/categories", GetCategories);
+    }
+
+    // ── 個股類別（供斷頭模擬依類股設定跌幅）──────────────────────────────
+    // 上市／上櫃公司基本資料的「產業別」代碼，一天更新一次；查不到時依股號區段推估
+    static Dictionary<string, string>? _industryCache;
+    static DateTime _industryCacheAt;
+    static readonly SemaphoreSlim _industryLock = new(1, 1);
+
+    static async Task<IResult> GetCategories(string? codes, IHttpClientFactory httpFactory)
+    {
+        var list = (codes ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var industries = await LoadIndustries(httpFactory);
+        var result = new Dictionary<string, string>();
+        foreach (var c in list)
+            result[c] = CategorizeStock(c, industries.TryGetValue(c, out var ind) ? ind : null);
+        return Results.Json(result);
+    }
+
+    static async Task<Dictionary<string, string>> LoadIndustries(IHttpClientFactory httpFactory)
+    {
+        if (_industryCache != null && DateTime.Now - _industryCacheAt < TimeSpan.FromHours(24)) return _industryCache;
+        await _industryLock.WaitAsync();
+        try
+        {
+            if (_industryCache != null && DateTime.Now - _industryCacheAt < TimeSpan.FromHours(24)) return _industryCache;
+            var map = new Dictionary<string, string>();
+            var client = httpFactory.CreateClient();
+            client.Timeout = TimeSpan.FromSeconds(15);
+            client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "Mozilla/5.0");
+            async Task Fetch(string url, string codeKey, string indKey)
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(await client.GetStringAsync(url));
+                    foreach (var e in doc.RootElement.EnumerateArray())
+                        if (e.TryGetProperty(codeKey, out var c) && c.ValueKind == JsonValueKind.String &&
+                            e.TryGetProperty(indKey, out var i) && i.ValueKind == JsonValueKind.String)
+                            map[c.GetString()!.Trim()] = i.GetString()!.Trim();
+                }
+                catch { }
+            }
+            await Fetch("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", "公司代號", "產業別");
+            await Fetch("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", "SecuritiesCompanyCode", "SecuritiesIndustryCode");
+            // 抓失敗時不快取太久，下次再試
+            _industryCache = map;
+            _industryCacheAt = map.Count > 0 ? DateTime.Now : DateTime.Now.AddHours(-23);
+            return map;
+        }
+        finally { _industryLock.Release(); }
+    }
+
+    static string CategorizeStock(string code, string? industry)
+    {
+        if (code.StartsWith("00"))
+        {
+            if (code.EndsWith("B", StringComparison.OrdinalIgnoreCase)) return "債券ETF";
+            if (code.EndsWith("L", StringComparison.OrdinalIgnoreCase)) return "槓桿ETF";
+            return "股票ETF";
+        }
+        if (industry != null)
+            return industry switch
+            {
+                "24" => "半導體",
+                "25" or "26" or "27" or "28" or "29" or "30" or "31" or "36" => "電子",
+                "17" => "金融",
+                "15" => "航運",
+                "14" => "營建",
+                "22" => "生技",
+                _ => "傳產"
+            };
+        // 查不到產業別時，依台股股號區段推估
+        var prefix = code.Length >= 2 ? code[..2] : code;
+        return prefix switch
+        {
+            "23" => "半導體",
+            "24" or "30" or "31" or "32" or "33" or "34" or "35" or "36" or "37" or "49" or "52" or "53" or "54" or "61" or "62" or "80" or "81" or "82" or "83" => "電子",
+            "28" or "58" or "60" => "金融",
+            "26" => "航運",
+            "25" => "營建",
+            "41" or "47" or "65" => "生技",
+            _ => "傳產"
+        };
     }
 
     // ── List page ────────────────────────────────────────────────────────
@@ -41,13 +124,14 @@ public static class PledgeModule
   <td class='num' id='daily-{p.Id}'>—</td>
   <td class='num' id='interest-{p.Id}'>—</td>
   <td class='num' id='owed-{p.Id}'>—</td>
+  <td class='num' id='net-{p.Id}'>—</td>
   <td class='num' id='mr-{p.Id}'>—</td>
   <td>{sinceCell}</td>
   <td>{System.Net.WebUtility.HtmlEncode(p.CustodyAccount)}</td>
   <td><button class='btn btn-sm btn-outline act-btn' onclick=""openActMenu(event,'{p.Id}')"">操作 ▾</button></td>
 </tr>
 <tr id='panel-{p.Id}' style='display:none' data-nofilter='1'>
-  <td colspan='13' style='background:#fafbfe;border-bottom:2px solid #dde4f5;padding:0'>
+  <td colspan='14' style='background:#fafbfe;border-bottom:2px solid #dde4f5;padding:0'>
     <div style='padding:14px 18px' id='panel-body-{p.Id}'></div>
   </td>
 </tr>";
@@ -56,7 +140,8 @@ public static class PledgeModule
         var body = $@"
 <div class='actions' style='margin-bottom:16px'>
   <h1 style='margin:0;flex:1'>🔒 股票質借</h1>
-  <button class='btn btn-sm btn-outline' onclick=""exportTableToExcel('pledge-table','股票質借',{{skipCols:[12],btn:this,includeFoot:true}})"">⬇ 下載Excel</button>
+  <button class='btn btn-sm btn-outline' onclick=""exportTableToExcel('pledge-table','股票質借',{{skipCols:[13],btn:this,includeFoot:true}})"">⬇ 下載Excel</button>
+  <button class='btn btn-outline' onclick=""toggleSim()"">📉 模擬斷頭</button>
   <button class='btn btn-outline' onclick=""toggleImport()"">📄 匯入對帳單</button>
   <button class='btn' onclick=""togglePanel('new','new')"">＋ 新增質借</button>
 </div>
@@ -74,6 +159,28 @@ public static class PledgeModule
   <div id='imp-result'></div>
 </div>
 
+<div id='simBox' class='form-card' style='display:none;margin-bottom:16px;max-width:none'>
+  <strong>📉 模擬斷頭（僅試算，不會修改資料）</strong>
+  <p style='font-size:.85rem;color:#666;margin:6px 0 10px'>設定股價跌幅後，以即時股價試算各筆質借的維持率、需補繳金額與斷頭價。跌幅可依設質個股的類股分別設定；類股自動判斷，若不正確可在下表直接改。</p>
+  <div class='mini-row'>
+    <div class='field'><label>跌幅設定方式</label>
+      <select id='sim-mode' onchange='onSimMode()' style='width:190px'>
+        <option value='uniform'>各類股跌幅一致</option>
+        <option value='beta'>依歷史跌幅比例（隨大盤）</option>
+        <option value='custom'>各類股自訂跌幅</option>
+      </select></div>
+    <div class='field' id='sim-drop-wrap'><label id='sim-drop-lbl'>跌幅（%）</label><input type='number' step='0.5' id='sim-drop' value='10' oninput='runSim()' style='width:100px'></div>
+    <div class='field'><label>快速套用</label>
+      <div style='display:flex;gap:4px'>{string.Join("", new[] { 5, 10, 20, 30, 40 }.Select(d => $"<button class='btn btn-sm btn-outline' style='width:auto;margin:0;padding:4px 8px' onclick='simQuick({d})'>{d}%</button>"))}</div></div>
+    <div class='field'><label>追繳線（%）</label><input type='number' id='sim-call' value='130' oninput='runSim()' style='width:90px'></div>
+    <div class='field'><label>需補足至（%）</label><input type='number' id='sim-target' value='166' oninput='runSim()' style='width:90px'></div>
+  </div>
+  <div id='sim-cats'></div>
+  <div id='sim-summary'></div>
+  <div class='table-wrap' id='sim-result'></div>
+  <p style='font-size:.78rem;color:#999;margin:8px 0 0'>需補金額：維持率低於追繳線時，補足至「需補足至」維持率所需金額。「補擔保品」＝ 以現金／股票增加擔保（目標 × 應償還 − 市值）；「或還款」＝ 直接還本金（應償還 − 市值 ÷ 目標），兩者擇一即可。斷頭價＝維持率剛好等於追繳線的股價。追繳與補足比率、是否整戶合併計算，依各證金／券商規定為準。歷史比例預設值為近年台股急跌期間的概略相對跌幅，可依自己的看法修改，設定會記在這台裝置上。</p>
+</div>
+
 <div class='cards' id='summaryCards'>
   <div class='card'><div class='lbl'>借款金額合計</div><div class='val pos' id='s-principal'>計算中…</div></div>
   <div class='card'><div class='lbl'>市值合計</div><div class='val' id='s-mv'>—</div></div>
@@ -86,13 +193,13 @@ public static class PledgeModule
 <thead><tr>
   <th>股票</th><th class='num'>張數</th><th class='num'>即時股價</th><th class='num'>市值</th>
   <th class='num'>借款金額</th><th class='num'>目前利率</th><th class='num'>日利息</th>
-  <th class='num'>累計利息</th><th class='num'>應償還金額</th><th class='num'>維持率</th>
+  <th class='num'>累計利息</th><th class='num'>應償還金額</th><th class='num' title='以即時股價全部賣出，扣除手續費、證交稅與應償還金額後可領回的現金'>賣出可領回</th><th class='num'>維持率</th>
   <th>起息(結算)日</th><th>集保帳號</th><th></th>
 </tr></thead>
 <tbody>
 <tr id='row-new' style='display:none' data-nofilter='1'></tr>
 <tr id='panel-new' style='display:none' data-nofilter='1'>
-  <td colspan='13' style='background:#f0f4ff;border-bottom:2px solid #c0d0f0;padding:0'>
+  <td colspan='14' style='background:#f0f4ff;border-bottom:2px solid #c0d0f0;padding:0'>
     <div style='padding:14px 18px' id='panel-body-new'></div>
   </td>
 </tr>
@@ -108,6 +215,7 @@ public static class PledgeModule
   <td class='num' id='ft-daily'>—</td>
   <td class='num' id='ft-interest'>—</td>
   <td class='num' id='ft-owed'>—</td>
+  <td class='num' id='ft-net'>—</td>
   <td class='num' id='ft-mr'>—</td>
   <td></td><td></td><td></td>
 </tr></tfoot>
@@ -115,7 +223,7 @@ public static class PledgeModule
 </div>
 {(pledges.Count == 0 ? "<div class='empty-state'><div class='icon'>🔒</div><p>尚無質借資料</p></div>" : "")}
 
-<p style='font-size:.8rem;color:#999;margin-top:8px'>維持率 = 市值 ÷ 應償還金額 × 100%。一般追繳線：130%，警戒線：140%，請依各券商規定為準。利率變更、還款皆會先依目前利率結算利息並累加，再套用新利率／扣減本金。</p>
+<p style='font-size:.8rem;color:#999;margin-top:8px'>賣出可領回 = 市值 − 手續費 0.1425%（未計折讓）− 證交稅（股票 0.3%、ETF 0.1%、債券 ETF 免稅）− 應償還金額。維持率 = 市值 ÷ 應償還金額 × 100%。一般追繳線：130%，警戒線：140%，請依各券商規定為準。利率變更、還款皆會先依目前利率結算利息並累加，再套用新利率／扣減本金。</p>
 <div id='msg' style='margin-top:16px'></div>
 
 <style>
@@ -139,6 +247,7 @@ th.num,td.num{{text-align:right}}
 .hist-table{{width:auto;font-size:.83rem;border-collapse:collapse;margin:6px 0;background:transparent;box-shadow:none}}
 .hist-table th{{padding:4px 10px;text-align:left;background:#f0f4ff}}
 .hist-table td{{padding:4px 10px;border-bottom:1px solid #eee}}
+#sim-result td,#sim-result th,#sim-summary td,#sim-summary th{{white-space:nowrap}}
 </style>
 
 <script>
@@ -166,6 +275,7 @@ async function refreshTable() {{
     try {{ const r = await fetch('/api/stocks/prices?codes=' + codes); prices = await r.json(); }} catch(e) {{}}
   }}
 
+  livePrices = prices;
   for (const p of pledges) {{
     const price = prices[p.stockCode] || 0;
     const mv = price * p.shares * 1000;
@@ -173,8 +283,11 @@ async function refreshTable() {{
     const owed = p.principal + interest;
     const dailyInt = p.principal * p.rate / 100 / 365;
     const mr = owed > 0 && mv > 0 ? mv / owed * 100 : 0;
+    const net = sellNet(p.stockCode, mv, owed);
 
     const set = (id, html) => {{ const el = document.getElementById(id); if (el) el.innerHTML = html; }};
+    if (p.closedDate || !(mv > 0)) set('net-' + p.id, '—');
+    else set('net-' + p.id, `<strong style='color:${{net >= 0 ? '#080' : '#c00'}}'>${{fmt(net)}}</strong>`);
     set('price-' + p.id, price ? price.toFixed(2) : '<span class=loading>—</span>');
     set('mv-' + p.id, mv > 0 ? fmt(mv) : '—');
     set('daily-' + p.id, dailyInt.toFixed(2));
@@ -189,12 +302,20 @@ async function refreshTable() {{
   }}
   // 個股市值等欄位為非同步填入，資料到位後重算篩選合計與摘要卡片
   if (pledgeTable) pledgeTable.run();
+  if (document.getElementById('simBox').style.display !== 'none') runSim();
 }}
+
+// 賣出成本：手續費 0.1425%（未計折讓，偏保守）+ 證交稅（股票 0.3%、ETF 0.1%、債券 ETF 免稅）
+function sellCostRate(code) {{
+  const tax = /^00.*B$/i.test(code) ? 0 : /^00/.test(code) ? 0.001 : 0.003;
+  return 0.001425 + tax;
+}}
+function sellNet(code, mv, owed) {{ return mv * (1 - sellCostRate(code)) - owed; }}
 
 // ── 篩選後加總（表尾合計 + 摘要卡片）───────────────────────────────────────
 function pnum(s) {{ return parseFloat(String(s || '').replace(/,/g, '')) || 0; }}
 function updatePledgeTotals(vis) {{
-  let shares = 0, mv = 0, principal = 0, daily = 0, interest = 0, owed = 0;
+  let shares = 0, mv = 0, principal = 0, daily = 0, interest = 0, owed = 0, net = 0;
   for (const r of vis) {{
     if (r.dataset.nofilter) continue;
     if (r.classList && r.classList.contains('closed-row')) continue; // 已結清不計入
@@ -204,6 +325,7 @@ function updatePledgeTotals(vis) {{
     daily     += pnum(r.cells[6] ? r.cells[6].textContent : '');
     interest  += pnum(r.cells[7] ? r.cells[7].textContent : '');
     owed      += pnum(r.cells[8] ? r.cells[8].textContent : '');
+    net       += pnum(r.cells[9] ? r.cells[9].textContent : '');
   }}
   const setInt = (id, v) => {{ const el = document.getElementById(id); if (el) el.textContent = fmt(v); }};
   setInt('ft-shares', shares);
@@ -212,6 +334,8 @@ function updatePledgeTotals(vis) {{
   const dEl = document.getElementById('ft-daily'); if (dEl) dEl.textContent = daily.toFixed(2);
   setInt('ft-interest', interest);
   setInt('ft-owed', owed);
+  const nEl = document.getElementById('ft-net');
+  if (nEl) nEl.innerHTML = `<span style='color:${{net >= 0 ? '#080' : '#c00'}}'>${{fmt(net)}}</span>`;
 
   const mr = owed > 0 && mv > 0 ? mv / owed * 100 : 0;
   const cls = mr < 130 ? 'mr-danger' : mr < 140 ? 'mr-warn' : 'mr-ok';
@@ -835,11 +959,201 @@ async function applyStatement() {{
   else showMsg(esc(await r.text()) || '套用失敗', 'err');
 }}
 
+// ── 模擬斷頭 ─────────────────────────────────────────────────────────────
+let livePrices = {{}}, stockCats = null;
+const SIM_CATS = ['股票ETF', '槓桿ETF', '債券ETF', '半導體', '電子', '金融', '航運', '營建', '生技', '傳產'];
+// 大盤跌 1% 時該類股約跌幾 %（近年急跌期間的概略比例）
+const DEFAULT_BETA = {{ '股票ETF': 1.0, '槓桿ETF': 2.0, '債券ETF': 0, '半導體': 1.2, '電子': 1.1, '金融': 0.5, '航運': 1.2, '營建': 0.7, '生技': 0.9, '傳產': 0.8 }};
+function lsGet(k, d) {{ try {{ const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; }} catch(e) {{ return d; }} }}
+function lsSet(k, v) {{ try {{ localStorage.setItem(k, JSON.stringify(v)); }} catch(e) {{}} }}
+let simBeta = Object.assign({{}}, DEFAULT_BETA, lsGet('pledgeSimBeta', {{}}));
+let simCustom = lsGet('pledgeSimCustom', {{}});
+let catOverride = lsGet('pledgeSimCatOverride', {{}});
+
+const openPledges = () => pledges.filter(p => !p.closedDate && p.shares > 0);
+function catOf(code) {{ return catOverride[code] || (stockCats && stockCats[code]) || '傳產'; }}
+
+async function toggleSim() {{
+  const box = document.getElementById('simBox');
+  box.style.display = box.style.display === 'none' ? '' : 'none';
+  if (box.style.display === 'none') return;
+  const s = lsGet('pledgeSimSettings', null);
+  if (s) {{
+    for (const k of ['mode', 'drop', 'call', 'target']) if (s[k] != null) document.getElementById('sim-' + k).value = s[k];
+  }}
+  onSimMode(true);
+  if (!stockCats) {{
+    document.getElementById('sim-result').innerHTML = `<p style='color:#888'>判斷類股中…</p>`;
+    const codes = [...new Set(openPledges().map(p => p.stockCode))].join(',');
+    try {{ stockCats = codes ? await (await fetch('/api/stocks/categories?codes=' + codes)).json() : {{}}; }} catch(e) {{ stockCats = {{}}; }}
+    renderSimCats();
+    runSim();
+  }}
+}}
+
+function onSimMode(noSave) {{
+  const mode = document.getElementById('sim-mode').value;
+  document.getElementById('sim-drop-wrap').style.display = mode === 'custom' ? 'none' : '';
+  document.getElementById('sim-drop-lbl').textContent = mode === 'beta' ? '大盤跌幅（%）' : '跌幅（%）';
+  renderSimCats();
+  runSim();
+}}
+
+function simQuick(d) {{
+  const mode = document.getElementById('sim-mode').value;
+  if (mode === 'custom') {{
+    for (const c of usedCats()) simCustom[c] = d;
+    lsSet('pledgeSimCustom', simCustom);
+    renderSimCats();
+  }} else document.getElementById('sim-drop').value = d;
+  runSim();
+}}
+
+function usedCats() {{
+  const set = new Set(openPledges().map(p => catOf(p.stockCode)));
+  return SIM_CATS.filter(c => set.has(c));
+}}
+
+function catDrop(cat) {{
+  const mode = document.getElementById('sim-mode').value;
+  const drop = parseFloat(document.getElementById('sim-drop').value) || 0;
+  if (mode === 'uniform') return drop;
+  if (mode === 'beta') return drop * (simBeta[cat] ?? 1);
+  return simCustom[cat] ?? drop;
+}}
+
+// 類股跌幅設定表（依歷史比例：可改比例；自訂：可改跌幅）
+function renderSimCats() {{
+  const el = document.getElementById('sim-cats');
+  const mode = document.getElementById('sim-mode').value;
+  if (mode === 'uniform' || !stockCats) {{ el.innerHTML = ''; return; }}
+  const cats = usedCats();
+  let html = `<table class='hist-table'><thead><tr><th>類股</th>${{cats.map(c => `<th style='text-align:right'>${{c}}</th>`).join('')}}</tr></thead><tbody>`;
+  if (mode === 'beta') {{
+    html += `<tr><td>相對大盤比例（倍）</td>${{cats.map(c => `<td><input type='number' step='0.1' value='${{simBeta[c] ?? 1}}' style='width:70px;padding:2px 4px;text-align:right' oninput=""setSimBeta('${{c}}',this.value)""></td>`).join('')}}</tr>`;
+    html += `<tr><td>模擬跌幅</td>${{cats.map(c => `<td style='text-align:right' id='simcat-${{c}}'>${{catDrop(c).toFixed(1)}}%</td>`).join('')}}</tr>`;
+    html += `</tbody></table><a href='#' style='font-size:.8rem;color:#888' onclick='resetSimBeta();return false'>恢復預設比例</a>`;
+  }} else {{
+    html += `<tr><td>跌幅（%）</td>${{cats.map(c => `<td><input type='number' step='0.5' value='${{catDrop(c)}}' style='width:70px;padding:2px 4px;text-align:right' oninput=""setSimCustom('${{c}}',this.value)""></td>`).join('')}}</tr></tbody></table>`;
+  }}
+  el.innerHTML = html;
+}}
+function setSimBeta(c, v) {{ simBeta[c] = parseFloat(v) || 0; lsSet('pledgeSimBeta', simBeta); runSim(); }}
+function setSimCustom(c, v) {{ simCustom[c] = parseFloat(v) || 0; lsSet('pledgeSimCustom', simCustom); runSim(); }}
+function resetSimBeta() {{ simBeta = Object.assign({{}}, DEFAULT_BETA); lsSet('pledgeSimBeta', {{}}); renderSimCats(); runSim(); }}
+function setCatOverride(code, v) {{
+  if (stockCats && stockCats[code] === v) delete catOverride[code]; else catOverride[code] = v;
+  lsSet('pledgeSimCatOverride', catOverride);
+  renderSimCats(); runSim();
+}}
+
+function mrHtml(mr, call) {{
+  if (!(mr > 0)) return '—';
+  const cls = mr < call ? 'mr-danger' : mr < call + 10 ? 'mr-warn' : 'mr-ok';
+  return `<span class='${{cls}}'>${{fmtD(mr)}}${{mr < call ? ' ⚠️追繳' : ''}}</span>`;
+}}
+
+function runSim() {{
+  if (!stockCats) return;
+  const mode = document.getElementById('sim-mode').value;
+  const call = parseFloat(document.getElementById('sim-call').value) || 130;
+  const target = Math.max(call, parseFloat(document.getElementById('sim-target').value) || call);
+  lsSet('pledgeSimSettings', {{ mode, drop: document.getElementById('sim-drop').value, call, target }});
+  if (mode === 'beta') for (const c of usedCats()) {{ const e = document.getElementById('simcat-' + c); if (e) e.textContent = catDrop(c).toFixed(1) + '%'; }}
+
+  const rows = [];
+  for (const p of openPledges()) {{
+    const price = livePrices[p.stockCode] || 0;
+    const cat = catOf(p.stockCode);
+    const d = catDrop(cat);
+    const simPrice = price * (1 - d / 100);
+    const mv0 = price * p.shares * 1000;
+    const mv = Math.max(0, simPrice * p.shares * 1000);
+    const owed = p.principal + totalInterest(p);
+    const mr = owed > 0 && mv > 0 ? mv / owed * 100 : 0;
+    const short = price > 0 && mr < call;
+    const topUp = short ? target / 100 * owed - mv : 0;
+    const repay = short ? owed - mv / (target / 100) : 0;
+    const callPrice = p.shares > 0 ? owed * call / 100 / (p.shares * 1000) : 0;
+    const toCall = price > 0 ? (1 - callPrice / price) * 100 : 0;
+    rows.push({{ p, price, cat, d, simPrice, mv0, mv, owed, mr, short, topUp, repay, callPrice, toCall, net: sellNet(p.stockCode, mv, owed) }});
+  }}
+
+  const catOpts = code => SIM_CATS.map(c => `<option${{c === catOf(code) ? ' selected' : ''}}>${{c}}</option>`).join('');
+  let html = `<table class='hist-table' style='width:100%'><thead><tr>
+    <th>股票</th><th>類股</th><th>集保帳號</th><th style='text-align:right'>張數</th><th style='text-align:right'>現價</th><th style='text-align:right'>跌幅</th>
+    <th style='text-align:right'>模擬股價</th><th style='text-align:right'>模擬市值</th><th style='text-align:right'>應償還</th>
+    <th style='text-align:right'>模擬維持率</th><th style='text-align:right'>需補擔保品</th><th style='text-align:right'>或還款</th>
+    <th style='text-align:right'>斷頭價</th><th style='text-align:right'>距斷頭跌幅</th><th style='text-align:right'>模擬賣出可領回</th>
+  </tr></thead><tbody>`;
+  for (const r of rows) {{
+    const noPrice = !(r.price > 0);
+    html += `<tr style='${{r.short ? 'background:#fff3f3' : ''}}'>
+      <td style='white-space:nowrap'>${{esc(r.p.stockCode)}} <span style='color:#666'>${{esc(r.p.stockName)}}</span></td>
+      <td><select style='width:auto;padding:1px 4px;font-size:.8rem' onchange=""setCatOverride('${{esc(r.p.stockCode)}}',this.value)"">${{catOpts(r.p.stockCode)}}</select></td>
+      <td>${{esc(r.p.custodyAccount)}}</td>
+      <td style='text-align:right'>${{r.p.shares}}</td>
+      <td style='text-align:right'>${{noPrice ? '—' : r.price.toFixed(2)}}</td>
+      <td style='text-align:right'>${{r.d.toFixed(1)}}%</td>
+      <td style='text-align:right'>${{noPrice ? '—' : r.simPrice.toFixed(2)}}</td>
+      <td style='text-align:right'>${{noPrice ? '—' : fmt(r.mv)}}</td>
+      <td style='text-align:right'>${{fmt(r.owed)}}</td>
+      <td style='text-align:right'>${{noPrice ? '<span style=""color:#c00"">無股價</span>' : mrHtml(r.mr, call)}}</td>
+      <td style='text-align:right'>${{r.short ? `<strong style='color:#c00'>${{fmt(r.topUp)}}</strong>` : '—'}}</td>
+      <td style='text-align:right'>${{r.short ? fmt(r.repay) : '—'}}</td>
+      <td style='text-align:right'>${{r.callPrice.toFixed(2)}}</td>
+      <td style='text-align:right'>${{noPrice ? '—' : r.toCall <= 0 ? `<span class='mr-danger'>已低於</span>` : r.toCall.toFixed(1) + '%'}}</td>
+      <td style='text-align:right;color:${{r.net >= 0 ? '#080' : '#c00'}}'>${{noPrice ? '—' : fmt(r.net)}}</td>
+    </tr>`;
+  }}
+  html += `</tbody></table>`;
+  document.getElementById('sim-result').innerHTML = rows.length ? html : `<p style='color:#888'>沒有未結清的質借。</p>`;
+
+  // 摘要：逐筆合計 + 整戶（依集保帳號合併）維持率
+  const priced = rows.filter(r => r.price > 0);
+  const sum = (arr, k) => arr.reduce((s, r) => s + r[k], 0);
+  const mv0 = sum(priced, 'mv0'), mv = sum(priced, 'mv'), owed = sum(priced, 'owed');
+  const mr = owed > 0 ? mv / owed * 100 : 0;
+  const topUpEach = sum(rows, 'topUp'), repayEach = sum(rows, 'repay');
+  const shortCount = rows.filter(r => r.short).length;
+  // 整戶觸及追繳線時的大盤（或一致）跌幅：Σ市值 × (1 − 係數 × x) = 追繳線 × Σ應償還
+  const weight = priced.reduce((s, r) => s + r.mv0 * (mode === 'beta' ? (simBeta[r.cat] ?? 1) : 1), 0);
+  const xCall = weight > 0 ? (mv0 - call / 100 * owed) / weight * 100 : null;
+
+  const card = (lbl, val, cls) => `<div class='card'><div class='lbl'>${{lbl}}</div><div class='val ${{cls || ''}}'>${{val}}</div></div>`;
+  let sh = `<div class='cards' style='margin:12px 0'>`;
+  sh += card('模擬市值合計', fmt(mv) + ' 元<div style=""font-size:.75rem;color:#888;font-weight:400"">現在 ' + fmt(mv0) + '（' + (mv0 > 0 ? ((mv / mv0 - 1) * 100).toFixed(1) : '0') + '%）</div>');
+  sh += card('模擬整體維持率', mr > 0 ? fmtD(mr) : '—', mr > 0 ? (mr < call ? 'mr-danger' : mr < call + 10 ? 'mr-warn' : 'mr-ok') : '');
+  sh += card(`逐筆需補擔保品（${{shortCount}} 筆追繳）`, fmt(topUpEach) + ' 元<div style=""font-size:.75rem;color:#888;font-weight:400"">或還款 ' + fmt(repayEach) + ' 元</div>', topUpEach > 0 ? 'mr-danger' : 'mr-ok');
+  if (mode !== 'custom' && xCall != null)
+    sh += card(mode === 'beta' ? '大盤跌多少整體觸及追繳線' : '一致跌多少整體觸及追繳線', xCall <= 0 ? '已低於追繳線' : xCall.toFixed(1) + '%', xCall < 10 ? 'mr-danger' : xCall < 20 ? 'mr-warn' : 'mr-ok');
+  sh += `</div>`;
+
+  // 依集保帳號整戶計算（多數證金以整戶維持率判斷追繳）
+  const accts = [...new Set(priced.map(r => r.p.custodyAccount || '（未填）'))];
+  if (accts.length) {{
+    sh += `<table class='hist-table'><thead><tr><th>整戶（集保帳號）</th><th style='text-align:right'>模擬市值</th><th style='text-align:right'>應償還</th><th style='text-align:right'>整戶維持率</th><th style='text-align:right'>整戶需補擔保品</th><th style='text-align:right'>或還款</th><th style='text-align:right'>模擬賣出可領回</th></tr></thead><tbody>`;
+    for (const a of accts) {{
+      const rs = priced.filter(r => (r.p.custodyAccount || '（未填）') === a);
+      const am = sum(rs, 'mv'), ao = sum(rs, 'owed'), amr = ao > 0 ? am / ao * 100 : 0, an = sum(rs, 'net');
+      const ashort = amr < call;
+      sh += `<tr><td>${{esc(a)}}</td><td style='text-align:right'>${{fmt(am)}}</td><td style='text-align:right'>${{fmt(ao)}}</td>
+        <td style='text-align:right'>${{mrHtml(amr, call)}}</td>
+        <td style='text-align:right'>${{ashort ? `<strong style='color:#c00'>${{fmt(target / 100 * ao - am)}}</strong>` : '—'}}</td>
+        <td style='text-align:right'>${{ashort ? fmt(ao - am / (target / 100)) : '—'}}</td>
+        <td style='text-align:right;color:${{an >= 0 ? '#080' : '#c00'}}'>${{fmt(an)}}</td></tr>`;
+    }}
+    sh += `</tbody></table>`;
+  }}
+  if (rows.some(r => !(r.price > 0))) sh += `<p style='font-size:.82rem;color:#c00'>部分股票抓不到即時股價，未計入合計。</p>`;
+  document.getElementById('sim-summary').innerHTML = sh;
+}}
+
 function showMsg(m, t) {{ document.getElementById('msg').innerHTML = `<div class='alert ${{t}}'>${{m}}</div>`; }}
 
 pledgeTable = initTable('pledge-table', {{
-  cols: 13,
-  noFilter: [2, 3, 6, 7, 8, 9, 12],
+  cols: 14,
+  noFilter: [2, 3, 6, 7, 8, 9, 10, 13],
   onFilter: updatePledgeTotals
 }});
 refreshTable();
