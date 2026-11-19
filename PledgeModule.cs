@@ -342,7 +342,8 @@ th.num,td.num{{text-align:right}}
 .vol{{display:flex;align-items:center;gap:12px;margin:10px 0;max-width:640px}}
 .vol .vl{{width:110px;font-size:.88rem;color:#444;flex:none}}
 .vol input[type=range]{{flex:1;width:auto;accent-color:#c0392b;height:6px;cursor:pointer}}
-.vol .vv{{width:64px;text-align:right;font-weight:700;font-size:1.05rem;color:#c0392b;flex:none}}
+.vol .vv{{text-align:right;font-weight:700;font-size:1.05rem;color:#c0392b;flex:none;white-space:nowrap}}
+.vol .vv input{{width:76px;margin:0 4px 0 0;padding:3px 6px;text-align:right;font-weight:700;font-size:1rem;color:#c0392b}}
 .vol .vs{{font-size:.78rem;color:#888;width:120px;flex:none}}
 .acct-row td{{background:#f0f4ff;font-weight:600}}
 .sim-tbl td.num,.sim-tbl th.num{{text-align:right}}
@@ -1100,8 +1101,8 @@ function setSimMode(m) {{
 // 類似音量調整的跌幅滑桿
 function slider(key, label, v) {{
   return `<div class='vol'><span class='vl'>${{label}}</span>
-    <input type='range' min='0' max='60' step='0.5' value='${{v}}' oninput=""onSlide('${{key}}',this.value)"">
-    <span class='vv' id='vv-${{key}}'>${{(+v).toFixed(1)}}%</span></div>`;
+    <input type='range' min='0' max='100' step='0.5' value='${{v}}' id='vr-${{key}}' oninput=""onSlide('${{key}}',this.value,'r')"">
+    <span class='vv'><input type='number' min='0' max='100' step='0.5' value='${{v}}' id='vn-${{key}}' oninput=""onSlide('${{key}}',this.value,'n')"">%</span></div>`;
 }}
 function renderSliders() {{
   const el = document.getElementById('sim-sliders');
@@ -1110,10 +1111,12 @@ function renderSliders() {{
   else
     el.innerHTML = slider('__drop', sim.mode === 'beta' ? '大盤跌幅' : '各類股跌幅', sim.drop);
 }}
-function onSlide(key, v) {{
-  v = parseFloat(v) || 0;
+// 滑桿與數字框互相同步；數字框可直接輸入 0～100
+function onSlide(key, v, from) {{
+  v = Math.min(100, Math.max(0, parseFloat(v) || 0));
   if (key === '__drop') sim.drop = v; else sim.custom[key] = v;
-  document.getElementById('vv-' + key).textContent = v.toFixed(1) + '%';
+  if (from !== 'r') document.getElementById('vr-' + key).value = v;
+  if (from !== 'n') document.getElementById('vn-' + key).value = v;
   saveSim(); runSim();
 }}
 
